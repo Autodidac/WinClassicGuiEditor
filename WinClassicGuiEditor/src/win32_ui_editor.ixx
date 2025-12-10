@@ -100,12 +100,23 @@ namespace
     auto& CurrentControls() noexcept { return g_controls; }
 
     // Forward decl
+    struct ParentInfo
+    {
+        HWND hwnd{};
+        RECT rect{};
+    };
+
     void RefreshPropertyPanel();
     void RebuildRuntimeControls();
     void RebuildZOrderListItems();
     void SyncZOrderSelection();
     void UpdateZOrderButtons();
     void ApplyZOrderToWindows();
+    void EndDrag();
+    ParentInfo GetParentInfoFor(const wui::ControlDef& c);
+    HWND EnsureControlCreated(int index);
+    void EnsureTabPageContainers(int tabIndex);
+    void ShowArrangeContextMenu(POINT screenPt);
 }
 
 // -----------------------------------------------------------------------------
@@ -942,14 +953,7 @@ namespace
 namespace
 {
     HWND GetTabPageContainer(int tabIndex, int pageIndex);
-    void EnsureTabPageContainers(int tabIndex);
     void UpdateTabPageVisibility(int tabIndex);
-
-    struct ParentInfo
-    {
-        HWND hwnd{};
-        RECT rect{};
-    };
 
     ParentInfo GetParentInfoFor(const wui::ControlDef& c)
     {
@@ -1019,8 +1023,6 @@ namespace
 
         return style;
     }
-
-    HWND EnsureControlCreated(int index);
 
     HWND EnsureControlCreated(int index)
     {
