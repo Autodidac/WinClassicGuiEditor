@@ -33,6 +33,14 @@ namespace
     HWND      g_hPropPanel{};
     HWND      g_hTabPageLabel{};
     HWND      g_hTabPageCombo{};
+    HWND      g_hZOrderList{};
+    HWND      g_hZBringFront{};
+    HWND      g_hZSendBack{};
+    HWND      g_hZForward{};
+    HWND      g_hZBackward{};
+
+    int       g_zListTop{ 0 };
+    bool      g_inZListUpdate{ false };
 
     constexpr int kDesignMargin = 8;
     constexpr int kPropPanelWidth = 320;
@@ -94,6 +102,10 @@ namespace
     // Forward decl
     void RefreshPropertyPanel();
     void RebuildRuntimeControls();
+    void RebuildZOrderListItems();
+    void SyncZOrderSelection();
+    void UpdateZOrderButtons();
+    void ApplyZOrderToWindows();
 }
 
 // -----------------------------------------------------------------------------
@@ -233,6 +245,8 @@ namespace
         g_selectedIndex = idx;
         InvalidateRect(g_hDesign, nullptr, TRUE);
         RefreshPropertyPanel();
+        SyncZOrderSelection();
+        UpdateZOrderButtons();
     }
 
     int FindControlIndexFromHwnd(HWND hwnd)
@@ -560,11 +574,91 @@ namespace
 }
 
 // -----------------------------------------------------------------------------
+// Z-ORDER LIST PANEL HELPERS
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    wstring ZOrderLabelForControl(const wui::ControlDef& c, int idx)
+    {
+        wstring label = std::format(L"{}: {}", idx, wui::ControlTypeLabel(c.type));
+        if (!c.text.empty())
+            label += std::format(L" - {}", c.text);
+        label += std::format(L" (ID {})", c.id);
+        return label;
+    }
+
+    void UpdateZOrderButtons()
+    {
+        auto set_enabled = [](HWND h, bool on)
+            {
+                if (h) EnableWindow(h, on);
+            };
+
+        const int count = static_cast<int>(CurrentControls().size());
+        const int idx = g_selectedIndex;
+        const bool hasSel = (idx >= 0 && idx < count);
+
+        set_enabled(g_hZBringFront, hasSel && idx < count - 1);
+        set_enabled(g_hZForward, hasSel && idx < count - 1);
+        set_enabled(g_hZSendBack, hasSel && idx > 0);
+        set_enabled(g_hZBackward, hasSel && idx > 0);
+    }
+
+    void SyncZOrderSelection()
+    {
+        if (!g_hZOrderList)
+            return;
+
+        g_inZListUpdate = true;
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+            SendMessageW(g_hZOrderList, LB_SETCURSEL, g_selectedIndex, 0);
+        else
+            SendMessageW(g_hZOrderList, LB_SETCURSEL, (WPARAM)-1, 0);
+        g_inZListUpdate = false;
+
+        UpdateZOrderButtons();
+    }
+
+    void RebuildZOrderListItems()
+    {
+        if (!g_hZOrderList)
+            return;
+
+        g_inZListUpdate = true;
+        SendMessageW(g_hZOrderList, LB_RESETCONTENT, 0, 0);
+
+        for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
+        {
+            const auto& c = CurrentControls()[i];
+            wstring label = ZOrderLabelForControl(c, i);
+            int pos = static_cast<int>(SendMessageW(g_hZOrderList, LB_ADDSTRING, 0, (LPARAM)label.c_str()));
+            SendMessageW(g_hZOrderList, LB_SETITEMDATA, pos, i);
+        }
+
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+            SendMessageW(g_hZOrderList, LB_SETCURSEL, g_selectedIndex, 0);
+        else
+            SendMessageW(g_hZOrderList, LB_SETCURSEL, (WPARAM)-1, 0);
+
+        g_inZListUpdate = false;
+
+        UpdateZOrderButtons();
+    }
+}
+
+// -----------------------------------------------------------------------------
 // PROPERTY PANEL
 // -----------------------------------------------------------------------------
 
 namespace
 {
+    constexpr int IDC_ZORDER_LIST = 300;
+    constexpr int IDC_ZORDER_BRING_FRONT = 301;
+    constexpr int IDC_ZORDER_SEND_BACK = 302;
+    constexpr int IDC_ZORDER_FORWARD = 303;
+    constexpr int IDC_ZORDER_BACKWARD = 304;
+
     enum class PropIndex
     {
         X = 0,
@@ -732,6 +826,9 @@ namespace
             }
         }
 
+        if (idx == PropIndex::Text || idx == PropIndex::ID)
+            RebuildZOrderListItems();
+
         RedrawDesignOverlay();
     }
 }
@@ -777,6 +874,26 @@ namespace
                 return 0;
             }
             break;
+        }
+
+        case WM_CONTEXTMENU:
+        {
+            int idx = FindControlIndexFromHwnd(hwnd);
+            if (idx >= 0)
+                SetSelectedIndex(idx);
+
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            if (pt.x == -1 && pt.y == -1)
+            {
+                GetCursorPos(&pt);
+            }
+            else
+            {
+                ClientToScreen(hwnd, &pt);
+            }
+
+            ShowArrangeContextMenu(pt);
+            return 0;
         }
 
         case WM_MOVE:
@@ -1112,6 +1229,31 @@ namespace
         g_originalProcs.clear();
     }
 
+    void ApplyZOrderToWindows()
+    {
+        if (g_hwndControls.empty())
+            return;
+
+        std::unordered_map<HWND, std::vector<HWND>> perParent;
+        for (HWND h : g_hwndControls)
+        {
+            if (!h || !::IsWindow(h))
+                continue;
+            HWND parent = GetParent(h);
+            perParent[parent].push_back(h);
+        }
+
+        for (auto& kv : perParent)
+        {
+            HWND insertAfter = HWND_BOTTOM;
+            for (HWND h : kv.second)
+            {
+                SetWindowPos(h, insertAfter, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+                insertAfter = h;
+            }
+        }
+    }
+
     void RebuildRuntimeControls()
     {
         DestroyRuntimeControls();
@@ -1120,6 +1262,8 @@ namespace
 
         for (int i = 0; i < (int)CurrentControls().size(); ++i)
             EnsureControlCreated(i);
+
+        ApplyZOrderToWindows();
     }
 }
 
@@ -1390,6 +1534,7 @@ namespace
 
         g_selectedIndex = CurrentControls().empty() ? -1 : 0;
 
+        RebuildZOrderListItems();
         RebuildRuntimeControls();
         RefreshPropertyPanel();
         RedrawDesignOverlay();
@@ -1424,7 +1569,20 @@ namespace
         IDM_ADD_COMBO,
         IDM_ADD_PROGRESS,
         IDM_ADD_SLIDER,
-        IDM_ADD_TAB
+        IDM_ADD_TAB,
+
+        IDM_ARRANGE_BRING_FRONT,
+        IDM_ARRANGE_SEND_BACK,
+        IDM_ARRANGE_FORWARD,
+        IDM_ARRANGE_BACKWARD
+    };
+
+    enum class ZOrderCommand
+    {
+        BringToFront,
+        SendToBack,
+        MoveForward,
+        MoveBackward,
     };
 
     void AddControl(wui::ControlType type)
@@ -1458,6 +1616,81 @@ namespace
         RebuildRuntimeControls();
         RefreshPropertyPanel();
         RedrawDesignOverlay();
+        RebuildZOrderListItems();
+    }
+
+    void ApplyZOrderCommand(ZOrderCommand cmd)
+    {
+        if (g_selectedIndex < 0 || CurrentControls().empty())
+            return;
+
+        const int count = static_cast<int>(CurrentControls().size());
+        const int oldIndex = g_selectedIndex;
+        int newIndex = oldIndex;
+        const int last = count - 1;
+
+        switch (cmd)
+        {
+        case ZOrderCommand::BringToFront: newIndex = last; break;
+        case ZOrderCommand::SendToBack:   newIndex = 0;   break;
+        case ZOrderCommand::MoveForward:  newIndex = std::min(last, oldIndex + 1); break;
+        case ZOrderCommand::MoveBackward: newIndex = std::max(0, oldIndex - 1); break;
+        }
+
+        if (newIndex == oldIndex)
+            return;
+
+        std::vector<int> order(count);
+        std::iota(order.begin(), order.end(), 0);
+
+        int movedId = order[oldIndex];
+        order.erase(order.begin() + oldIndex);
+        order.insert(order.begin() + newIndex, movedId);
+
+        std::vector<int> oldToNew(count, -1);
+        for (int i = 0; i < count; ++i)
+            oldToNew[order[i]] = i;
+
+        auto reordered = CurrentControls();
+        for (int i = 0; i < count; ++i)
+        {
+            auto c = CurrentControls()[order[i]];
+            if (c.parentIndex >= 0 && c.parentIndex < count)
+                c.parentIndex = oldToNew[c.parentIndex];
+            reordered[i] = std::move(c);
+        }
+
+        CurrentControls() = std::move(reordered);
+        g_selectedIndex = oldToNew[oldIndex];
+
+        RebuildRuntimeControls();
+        ApplyZOrderToWindows();
+        RebuildZOrderListItems();
+        RefreshPropertyPanel();
+        RedrawDesignOverlay();
+        SyncZOrderSelection();
+    }
+
+    void ShowArrangeContextMenu(POINT screenPt)
+    {
+        HMENU hMenu = CreatePopupMenu();
+        if (!hMenu)
+            return;
+
+        const int count = static_cast<int>(CurrentControls().size());
+        const int idx = g_selectedIndex;
+        const bool hasSel = (idx >= 0 && idx < count);
+        const bool canFront = hasSel && idx < count - 1;
+        const bool canBack = hasSel && idx > 0;
+
+        AppendMenuW(hMenu, MF_STRING | (canFront ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_BRING_FRONT, L"Bring to Front");
+        AppendMenuW(hMenu, MF_STRING | (canFront ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_FORWARD, L"Move Forward");
+        AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+        AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_BACKWARD, L"Move Backward");
+        AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_SEND_BACK, L"Send to Back");
+
+        TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN, screenPt.x, screenPt.y, 0, g_hMain, nullptr);
+        DestroyMenu(hMenu);
     }
 
     void BuildMenus(HWND hwnd)
@@ -1465,6 +1698,7 @@ namespace
         HMENU hMenuBar = CreateMenu();
         HMENU hFile = CreateMenu();
         HMENU hInsert = CreateMenu();
+        HMENU hArrange = CreateMenu();
 
         AppendMenuW(hFile, MF_STRING, IDM_NEW, L"&New");
         AppendMenuW(hFile, MF_STRING, IDM_EXPORT, L"E&xport to Clipboard");
@@ -1485,6 +1719,11 @@ namespace
 
         AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
         AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hInsert, L"&Insert");
+        AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_BRING_FRONT, L"Bring to &Front");
+        AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_FORWARD, L"Move &Forward");
+        AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_BACKWARD, L"Move &Backward");
+        AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_SEND_BACK, L"Send to &Back");
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
 
         SetMenu(hwnd, hMenuBar);
     }
@@ -1591,6 +1830,81 @@ namespace
 
         ShowWindow(g_hTabPageLabel, SW_HIDE);
         ShowWindow(g_hTabPageCombo, SW_HIDE);
+
+        y += 40;
+        CreateWindowExW(
+            0, L"STATIC", L"Z-Order:",
+            WS_CHILD | WS_VISIBLE,
+            8, y, 100, 18,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        g_zListTop = y + 20;
+        g_hZOrderList = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+            8, g_zListTop, kPropPanelWidth - 16, 200,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_LIST, g_hInst, nullptr);
+
+        const int btnWidth = (kPropPanelWidth - 24) / 2;
+        int btnY = g_zListTop + 208;
+
+        g_hZBringFront = CreateWindowExW(
+            0, L"BUTTON", L"Bring to Front",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            8, btnY, btnWidth, 24,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_BRING_FRONT, g_hInst, nullptr);
+
+        g_hZSendBack = CreateWindowExW(
+            0, L"BUTTON", L"Send to Back",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            16 + btnWidth, btnY, btnWidth, 24,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_SEND_BACK, g_hInst, nullptr);
+
+        btnY += 28;
+        g_hZForward = CreateWindowExW(
+            0, L"BUTTON", L"Move Forward",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            8, btnY, btnWidth, 24,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_FORWARD, g_hInst, nullptr);
+
+        g_hZBackward = CreateWindowExW(
+            0, L"BUTTON", L"Move Backward",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            16 + btnWidth, btnY, btnWidth, 24,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_BACKWARD, g_hInst, nullptr);
+
+        RebuildZOrderListItems();
+    }
+
+    void LayoutZOrderPanel()
+    {
+        if (!g_hPropPanel || !g_hZOrderList)
+            return;
+
+        RECT rc{};
+        GetClientRect(g_hPropPanel, &rc);
+
+        const int margin = 8;
+        const int buttonHeight = 24;
+        const int buttonSpacing = 6;
+        const int listTop = g_zListTop;
+        const int minListHeight = 80;
+        const int listWidth = kPropPanelWidth - margin * 2;
+
+        const int available = rc.bottom - listTop - (buttonHeight * 2 + buttonSpacing * 2 + margin);
+        const int listHeight = std::max(minListHeight, available);
+
+        MoveWindow(g_hZOrderList, margin, listTop, listWidth, listHeight, TRUE);
+
+        int btnY = listTop + listHeight + buttonSpacing;
+        const int btnWidth = (kPropPanelWidth - margin * 3) / 2;
+
+        MoveWindow(g_hZBringFront, margin, btnY, btnWidth, buttonHeight, TRUE);
+        MoveWindow(g_hZSendBack, margin * 2 + btnWidth, btnY, btnWidth, buttonHeight, TRUE);
+
+        btnY += buttonHeight + buttonSpacing;
+        MoveWindow(g_hZForward, margin, btnY, btnWidth, buttonHeight, TRUE);
+        MoveWindow(g_hZBackward, margin * 2 + btnWidth, btnY, btnWidth, buttonHeight, TRUE);
     }
 
     void LayoutChildren(HWND hwnd)
@@ -1626,6 +1940,8 @@ namespace
                 rcClient.bottom,
                 TRUE
             );
+
+            LayoutZOrderPanel();
         }
     }
 }
@@ -1684,6 +2000,22 @@ namespace
                 return 0;
             }
             break;
+        }
+
+        case WM_CONTEXTMENU:
+        {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            if (pt.x == -1 && pt.y == -1)
+            {
+                GetCursorPos(&pt);
+            }
+            else
+            {
+                MapWindowPoints(hwnd, HWND_DESKTOP, &pt, 1);
+            }
+
+            ShowArrangeContextMenu(pt);
+            return 0;
         }
 
         case WM_PAINT:
@@ -1820,11 +2152,32 @@ namespace
                 return 0;
             }
 
+            if (id == IDC_ZORDER_LIST && code == LBN_SELCHANGE && !g_inZListUpdate)
+            {
+                int sel = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETCURSEL, 0, 0));
+                if (sel >= 0 && sel < static_cast<int>(CurrentControls().size()))
+                    SetSelectedIndex(sel);
+                return 0;
+            }
+
+            if (code == BN_CLICKED)
+            {
+                switch (id)
+                {
+                case IDC_ZORDER_BRING_FRONT: ApplyZOrderCommand(ZOrderCommand::BringToFront); return 0;
+                case IDC_ZORDER_SEND_BACK:   ApplyZOrderCommand(ZOrderCommand::SendToBack);   return 0;
+                case IDC_ZORDER_FORWARD:     ApplyZOrderCommand(ZOrderCommand::MoveForward);  return 0;
+                case IDC_ZORDER_BACKWARD:    ApplyZOrderCommand(ZOrderCommand::MoveBackward); return 0;
+                default: break;
+                }
+            }
+
             switch (id)
             {
             case IDM_NEW:
                 CurrentControls().clear();
                 g_selectedIndex = -1;
+                RebuildZOrderListItems();
                 RebuildRuntimeControls();
                 RefreshPropertyPanel();
                 RedrawDesignOverlay();
@@ -1853,6 +2206,11 @@ namespace
             case IDM_ADD_PROGRESS: AddControl(wui::ControlType::Progress); return 0;
             case IDM_ADD_SLIDER:   AddControl(wui::ControlType::Slider);   return 0;
             case IDM_ADD_TAB:      AddControl(wui::ControlType::Tab);      return 0;
+
+            case IDM_ARRANGE_BRING_FRONT: ApplyZOrderCommand(ZOrderCommand::BringToFront); return 0;
+            case IDM_ARRANGE_SEND_BACK:   ApplyZOrderCommand(ZOrderCommand::SendToBack);   return 0;
+            case IDM_ARRANGE_FORWARD:     ApplyZOrderCommand(ZOrderCommand::MoveForward);  return 0;
+            case IDM_ARRANGE_BACKWARD:    ApplyZOrderCommand(ZOrderCommand::MoveBackward); return 0;
 
             default:
                 break;
