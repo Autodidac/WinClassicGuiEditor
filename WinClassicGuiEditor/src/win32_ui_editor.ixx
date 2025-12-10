@@ -60,6 +60,35 @@ namespace
     std::unordered_map<HWND, WNDPROC> g_originalProcs;
     WNDPROC g_originalDesignProc{};
 
+    enum class DragHandle
+    {
+        None,
+        Move,
+        Left,
+        Right,
+        Top,
+        Bottom,
+        TopLeft,
+        TopRight,
+        BottomLeft,
+        BottomRight,
+    };
+
+    struct DragState
+    {
+        bool       active{ false };
+        DragHandle handle{ DragHandle::None };
+        POINT      startPt{};      // in design surface coords
+        RECT       startRect{};    // control rect in design coords
+    };
+
+    DragState g_drag{};
+
+    constexpr int kHandleSize = 6;
+    constexpr int kGridSize = 4;
+    constexpr DWORD kPropPanelDebounceMs = 60;
+    DWORD g_lastPropRefreshTick{ 0 };
+
     auto& CurrentControls() noexcept { return g_controls; }
 
     // Forward decl
@@ -198,7 +227,11 @@ namespace
         if (idx < -1 || idx >= static_cast<int>(CurrentControls().size()))
             return;
 
+        if (g_drag.active)
+            EndDrag();
+
         g_selectedIndex = idx;
+        InvalidateRect(g_hDesign, nullptr, TRUE);
         RefreshPropertyPanel();
     }
 
@@ -210,6 +243,274 @@ namespace
                 return i;
         }
         return -1;
+    }
+
+    POINT ScreenToDesign(POINT pt)
+    {
+        MapWindowPoints(HWND_DESKTOP, g_hDesign, &pt, 1);
+        return pt;
+    }
+
+    POINT ClientToDesign(HWND from, POINT pt)
+    {
+        MapWindowPoints(from, g_hDesign, &pt, 1);
+        return pt;
+    }
+
+    RECT SelectedRect()
+    {
+        RECT rc{};
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+            rc = CurrentControls()[g_selectedIndex].rect;
+        return rc;
+    }
+
+    int SnapToGrid(int value)
+    {
+        return ((value + (kGridSize / 2)) / kGridSize) * kGridSize;
+    }
+
+    RECT ClampToDesignSurface(const RECT& rc)
+    {
+        RECT bounds{};
+        GetClientRect(g_hDesign, &bounds);
+
+        RECT out = rc;
+        const int minW = 4;
+        const int minH = 4;
+
+        if (out.right - out.left < minW)
+            out.right = out.left + minW;
+        if (out.bottom - out.top < minH)
+            out.bottom = out.top + minH;
+
+        if (out.left < bounds.left)
+        {
+            int delta = bounds.left - out.left;
+            out.left += delta;
+            out.right += delta;
+        }
+        if (out.top < bounds.top)
+        {
+            int delta = bounds.top - out.top;
+            out.top += delta;
+            out.bottom += delta;
+        }
+
+        if (out.right > bounds.right)
+        {
+            int delta = out.right - bounds.right;
+            out.right -= delta;
+            out.left -= delta;
+        }
+        if (out.bottom > bounds.bottom)
+        {
+            int delta = out.bottom - bounds.bottom;
+            out.bottom -= delta;
+            out.top -= delta;
+        }
+
+        return out;
+    }
+
+    void RefreshPropertyPanelDebounced(bool force = false)
+    {
+        const DWORD tick = GetTickCount();
+        if (force || tick - g_lastPropRefreshTick >= kPropPanelDebounceMs)
+        {
+            g_lastPropRefreshTick = tick;
+            RefreshPropertyPanel();
+        }
+    }
+
+    std::array<RECT, 8> BuildHandleRects(const RECT& rc)
+    {
+        const int hs = kHandleSize;
+        const int midX = rc.left + (rc.right - rc.left) / 2;
+        const int midY = rc.top + (rc.bottom - rc.top) / 2;
+
+        return std::array<RECT, 8>{
+            RECT{ rc.left - hs, rc.top - hs, rc.left + hs, rc.top + hs },                     // TL
+            RECT{ midX - hs, rc.top - hs, midX + hs, rc.top + hs },                           // T
+            RECT{ rc.right - hs, rc.top - hs, rc.right + hs, rc.top + hs },                  // TR
+            RECT{ rc.left - hs, midY - hs, rc.left + hs, midY + hs },                        // L
+            RECT{ rc.right - hs, midY - hs, rc.right + hs, midY + hs },                      // R
+            RECT{ rc.left - hs, rc.bottom - hs, rc.left + hs, rc.bottom + hs },              // BL
+            RECT{ midX - hs, rc.bottom - hs, midX + hs, rc.bottom + hs },                    // B
+            RECT{ rc.right - hs, rc.bottom - hs, rc.right + hs, rc.bottom + hs },            // BR
+        };
+    }
+
+    DragHandle HitTestHandles(const POINT& pt, const RECT& rc)
+    {
+        auto handles = BuildHandleRects(rc);
+        if (PtInRect(&handles[0], pt)) return DragHandle::TopLeft;
+        if (PtInRect(&handles[1], pt)) return DragHandle::Top;
+        if (PtInRect(&handles[2], pt)) return DragHandle::TopRight;
+        if (PtInRect(&handles[3], pt)) return DragHandle::Left;
+        if (PtInRect(&handles[4], pt)) return DragHandle::Right;
+        if (PtInRect(&handles[5], pt)) return DragHandle::BottomLeft;
+        if (PtInRect(&handles[6], pt)) return DragHandle::Bottom;
+        if (PtInRect(&handles[7], pt)) return DragHandle::BottomRight;
+        return DragHandle::None;
+    }
+
+    void ApplyRectToControl(int index, const RECT& rc)
+    {
+        if (index < 0 || index >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        auto& c = CurrentControls()[index];
+        c.rect = rc;
+
+        if (index >= 0 && index < static_cast<int>(g_hwndControls.size()))
+        {
+            HWND h = g_hwndControls[index];
+            if (h)
+            {
+                ParentInfo pinfo = GetParentInfoFor(c);
+                const int w = c.rect.right - c.rect.left;
+                const int hgt = c.rect.bottom - c.rect.top;
+                const int relX = c.rect.left - pinfo.rect.left;
+                const int relY = c.rect.top - pinfo.rect.top;
+                MoveWindow(h, relX, relY, w, hgt, TRUE);
+
+                if (c.type == wui::ControlType::Tab)
+                    EnsureTabPageContainers(index);
+            }
+        }
+    }
+
+    void RedrawDesignOverlay()
+    {
+        if (!g_hDesign)
+            return;
+        InvalidateRect(g_hDesign, nullptr, TRUE);
+        UpdateWindow(g_hDesign);
+    }
+
+    bool BeginDrag(const POINT& designPt)
+    {
+        if (g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+            return false;
+
+        RECT rc = SelectedRect();
+        DragHandle h = HitTestHandles(designPt, rc);
+        if (h == DragHandle::None && PtInRect(&rc, designPt))
+            h = DragHandle::Move;
+
+        if (h == DragHandle::None)
+            return false;
+
+        g_drag.active = true;
+        g_drag.handle = h;
+        g_drag.startPt = designPt;
+        g_drag.startRect = rc;
+
+        SetCapture(g_hDesign);
+        return true;
+    }
+
+    void UpdateDrag(const POINT& designPt)
+    {
+        if (!g_drag.active || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        RECT rc = g_drag.startRect;
+        const int dx = designPt.x - g_drag.startPt.x;
+        const int dy = designPt.y - g_drag.startPt.y;
+
+        const int origW = rc.right - rc.left;
+        const int origH = rc.bottom - rc.top;
+
+        switch (g_drag.handle)
+        {
+        case DragHandle::Move:
+            OffsetRect(&rc, dx, dy);
+            rc.left = SnapToGrid(rc.left);
+            rc.top = SnapToGrid(rc.top);
+            rc.right = rc.left + origW;
+            rc.bottom = rc.top + origH;
+            break;
+        case DragHandle::Left:
+            rc.left += dx;
+            break;
+        case DragHandle::Right:
+            rc.right += dx;
+            break;
+        case DragHandle::Top:
+            rc.top += dy;
+            break;
+        case DragHandle::Bottom:
+            rc.bottom += dy;
+            break;
+        case DragHandle::TopLeft:
+            rc.left += dx; rc.top += dy; break;
+        case DragHandle::TopRight:
+            rc.right += dx; rc.top += dy; break;
+        case DragHandle::BottomLeft:
+            rc.left += dx; rc.bottom += dy; break;
+        case DragHandle::BottomRight:
+            rc.right += dx; rc.bottom += dy; break;
+        default:
+            break;
+        }
+
+        if (g_drag.handle != DragHandle::Move)
+        {
+            rc.left = SnapToGrid(rc.left);
+            rc.top = SnapToGrid(rc.top);
+            rc.right = SnapToGrid(rc.right);
+            rc.bottom = SnapToGrid(rc.bottom);
+        }
+
+        rc = ClampToDesignSurface(rc);
+        ApplyRectToControl(g_selectedIndex, rc);
+        RefreshPropertyPanelDebounced();
+        RedrawDesignOverlay();
+    }
+
+    void EndDrag()
+    {
+        if (!g_drag.active)
+            return;
+
+        g_drag = {};
+        ReleaseCapture();
+        RefreshPropertyPanelDebounced(true);
+        RedrawDesignOverlay();
+    }
+
+    void DrawSelectionOverlayNow()
+    {
+        if (!g_hDesign || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        RECT rc = SelectedRect();
+        HDC hdc = GetWindowDC(g_hDesign);
+        if (!hdc)
+            return;
+
+        const COLORREF accent = RGB(0, 120, 215);
+        HPEN pen = CreatePen(PS_SOLID, 1, accent);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
+        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+
+        Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+
+        HBRUSH hBrush = CreateSolidBrush(accent);
+        HBRUSH oldHandleBrush = (HBRUSH)SelectObject(hdc, hBrush);
+        for (const auto& handleRc : BuildHandleRects(rc))
+        {
+            Rectangle(hdc, handleRc.left, handleRc.top, handleRc.right, handleRc.bottom);
+        }
+
+        SelectObject(hdc, oldHandleBrush);
+        DeleteObject(hBrush);
+        SelectObject(hdc, oldPen);
+        DeleteObject(pen);
+        SelectObject(hdc, oldBrush);
+        ReleaseDC(g_hDesign, hdc);
     }
 }
 
@@ -385,6 +686,8 @@ namespace
                     EnsureTabPageContainers(g_selectedIndex);
             }
         }
+
+        RedrawDesignOverlay();
     }
 }
 
@@ -409,8 +712,34 @@ namespace
                 if (g_hwndControls[i] == hwnd)
                 {
                     SetSelectedIndex(i);
+                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                    POINT designPt = ClientToDesign(hwnd, pt);
+                    if (BeginDrag(designPt))
+                        return 0;
                     break;
                 }
+            }
+            break;
+        }
+
+        case WM_MOUSEMOVE:
+        {
+            if (g_drag.active)
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT designPt = ClientToDesign(hwnd, pt);
+                UpdateDrag(designPt);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_LBUTTONUP:
+        {
+            if (g_drag.active)
+            {
+                EndDrag();
+                return 0;
             }
             break;
         }
@@ -1009,6 +1338,7 @@ namespace
 
         RebuildRuntimeControls();
         RefreshPropertyPanel();
+        RedrawDesignOverlay();
 
         wchar_t msg[128];
         std::swprintf(msg, std::size(msg),
@@ -1073,6 +1403,7 @@ namespace
 
         RebuildRuntimeControls();
         RefreshPropertyPanel();
+        RedrawDesignOverlay();
     }
 
     void BuildMenus(HWND hwnd)
@@ -1266,6 +1597,53 @@ namespace
             }
             break;
         }
+
+        case WM_LBUTTONDOWN:
+        {
+            POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+            POINT designPt = pt;
+            if (BeginDrag(designPt))
+                return 0;
+
+            // Deselect if clicking empty space
+            SetSelectedIndex(-1);
+            RedrawDesignOverlay();
+            return 0;
+        }
+
+        case WM_MOUSEMOVE:
+        {
+            if (g_drag.active)
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                UpdateDrag(pt);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_LBUTTONUP:
+        {
+            if (g_drag.active)
+            {
+                EndDrag();
+                return 0;
+            }
+            break;
+        }
+
+        case WM_PAINT:
+        {
+            PAINTSTRUCT ps{};
+            HDC hdc = BeginPaint(hwnd, &ps);
+            if (hdc)
+            {
+                FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+            }
+            EndPaint(hwnd, &ps);
+            DrawSelectionOverlayNow();
+            return 0;
+        }
         }
 
         if (g_originalDesignProc)
@@ -1395,6 +1773,7 @@ namespace
                 g_selectedIndex = -1;
                 RebuildRuntimeControls();
                 RefreshPropertyPanel();
+                RedrawDesignOverlay();
                 return 0;
 
             case IDM_EXPORT:
