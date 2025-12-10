@@ -577,23 +577,60 @@ namespace win32_ui_editor::importparser::detail
                 wstring idName;
                 int     id = -1;
                 {
-                    if (menuExpr.find("HMENU") != string::npos)
-                    {
-                        size_t p = menuExpr.find("ID_");
-                        if (p != string::npos)
+                    auto trim = [](const string& s) {
+                        size_t b = 0, e = s.size();
+                        while (b < e && std::isspace((unsigned char)s[b])) ++b;
+                        while (e > b && std::isspace((unsigned char)s[e - 1])) --e;
+                        return s.substr(b, e - b);
+                        };
+
+                    auto parseMenuId = [&](const string& expr) -> std::pair<int, wstring>
                         {
-                            size_t q = p;
-                            while (q < menuExpr.size() &&
-                                (std::isalnum((unsigned char)menuExpr[q]) ||
-                                    menuExpr[q] == '_'))
+                            string trimmed = trim(expr);
+                            string upper = trimmed;
+                            std::transform(upper.begin(), upper.end(), upper.begin(), [](unsigned char c) { return (char)std::toupper(c); });
+                            if (upper == "NULL" || upper == "0" || upper == "nullptr")
+                                return { -1, wstring{} };
+
+                            auto tokens = tokenizeExpr(expr);
+                            if (!tokens.empty() && tokens.back().kind == TokKind::End)
+                                tokens.pop_back();
+
+                            static const std::unordered_set<string> kSkip{ "HMENU", "reinterpret_cast", "static_cast", "const_cast" };
+
+                            int value = -1;
+                            wstring name;
+
+                            for (size_t idx = tokens.size(); idx-- > 0;)
                             {
-                                ++q;
+                                const auto& tk = tokens[idx];
+                                if (tk.kind == TokKind::Number && value == -1)
+                                {
+                                    try { value = std::stoi(tk.text, nullptr, 0); }
+                                    catch (...) {}
+                                    if (value != -1)
+                                        break;
+                                }
+                                else if (tk.kind == TokKind::Identifier)
+                                {
+                                    if (kSkip.contains(tk.text))
+                                        continue;
+                                    if (tk.text == "NULL" || tk.text == "nullptr")
+                                        return { -1, wstring{} };
+
+                                    name = wstring(tk.text.begin(), tk.text.end());
+                                    break;
+                                }
                             }
 
-                            idName = wstring(menuExpr.begin() + p, menuExpr.begin() + q);
-                        }
-                        id = 1000 + (int)controls.size();
-                    }
+                            return { value, name };
+                        };
+
+                    auto [parsedId, parsedName] = parseMenuId(menuExpr);
+                    if (parsedId != -1)
+                        id = parsedId;
+                    if (!parsedName.empty())
+                        idName = parsedName;
                 }
 
                 // Extract class name
