@@ -31,6 +31,8 @@ namespace
     HWND      g_hMain{};
     HWND      g_hDesign{};
     HWND      g_hPropPanel{};
+    HWND      g_hTabPageLabel{};
+    HWND      g_hTabPageCombo{};
 
     constexpr int kDesignMargin = 8;
     constexpr int kPropPanelWidth = 320;
@@ -44,6 +46,7 @@ namespace
     HWND g_hStyleChkBorder{};
 
     bool g_inStyleUpdate{ false };
+    bool g_inTabPageUpdate{ false };
 
     // Model
     vector<wui::ControlDef> g_controls;
@@ -51,9 +54,11 @@ namespace
 
     // Runtime HWNDs per control index
     vector<HWND> g_hwndControls;
+    std::unordered_map<int, std::vector<HWND>> g_tabPageContainers;
 
     // Subclassing map for live controls
     std::unordered_map<HWND, WNDPROC> g_originalProcs;
+    WNDPROC g_originalDesignProc{};
 
     auto& CurrentControls() noexcept { return g_controls; }
 
@@ -196,6 +201,16 @@ namespace
         g_selectedIndex = idx;
         RefreshPropertyPanel();
     }
+
+    int FindControlIndexFromHwnd(HWND hwnd)
+    {
+        for (int i = 0; i < static_cast<int>(g_hwndControls.size()); ++i)
+        {
+            if (g_hwndControls[i] == hwnd)
+                return i;
+        }
+        return -1;
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -229,6 +244,44 @@ namespace
         sync_style_checkboxes_from_expr(style);
     }
 
+    const vector<wstring>& TabPagesFor(const wui::ControlDef& tab)
+    {
+        static const vector<wstring> kDefaultPages{ L"Page 1", L"Page 2" };
+        return tab.tabPages.empty() ? kDefaultPages : tab.tabPages;
+    }
+
+    void RefreshTabPageSelector(const wui::ControlDef& c)
+    {
+        if (!g_hTabPageCombo || !g_hTabPageLabel)
+            return;
+
+        bool hasTabParent = false;
+        const wui::ControlDef* parent = nullptr;
+        if (c.parentIndex >= 0 && c.parentIndex < static_cast<int>(CurrentControls().size()))
+        {
+            parent = &CurrentControls()[c.parentIndex];
+            hasTabParent = parent->type == wui::ControlType::Tab;
+        }
+
+        ShowWindow(g_hTabPageCombo, hasTabParent ? SW_SHOW : SW_HIDE);
+        ShowWindow(g_hTabPageLabel, hasTabParent ? SW_SHOW : SW_HIDE);
+
+        if (!hasTabParent)
+            return;
+
+        const auto& pages = TabPagesFor(*parent);
+        g_inTabPageUpdate = true;
+        SendMessageW(g_hTabPageCombo, CB_RESETCONTENT, 0, 0);
+        for (const auto& p : pages)
+            SendMessageW(g_hTabPageCombo, CB_ADDSTRING, 0, (LPARAM)p.c_str());
+
+        int sel = c.tabPageId;
+        if (sel < 0 || sel >= static_cast<int>(pages.size()))
+            sel = 0;
+        SendMessageW(g_hTabPageCombo, CB_SETCURSEL, sel, 0);
+        g_inTabPageUpdate = false;
+    }
+
     void RefreshPropertyPanel()
     {
         if (!g_hPropPanel)
@@ -245,6 +298,8 @@ namespace
             if (g_hStyleEdit)
                 set_window_text_w(g_hStyleEdit, L"");
             sync_style_checkboxes_from_expr(L"");
+            ShowWindow(g_hTabPageCombo, SW_HIDE);
+            ShowWindow(g_hTabPageLabel, SW_HIDE);
             return;
         }
 
@@ -266,6 +321,7 @@ namespace
         set_edit_int(g_hPropEdits[(int)PropIndex::ID], c.id);
 
         RefreshStylePanel(c);
+        RefreshTabPageSelector(c);
     }
 
     void ApplyPropertyChange(PropIndex idx)
@@ -315,12 +371,18 @@ namespace
             HWND h = g_hwndControls[g_selectedIndex];
             if (h)
             {
+                ParentInfo pinfo = GetParentInfoFor(c);
                 const int w = c.rect.right - c.rect.left;
                 const int hgt = c.rect.bottom - c.rect.top;
-                MoveWindow(h, c.rect.left, c.rect.top, w, hgt, TRUE);
+                const int relX = c.rect.left - pinfo.rect.left;
+                const int relY = c.rect.top - pinfo.rect.top;
+                MoveWindow(h, relX, relY, w, hgt, TRUE);
 
                 if (idx == PropIndex::Text)
                     set_window_text_w(h, c.text);
+
+                if (c.type == wui::ControlType::Tab)
+                    EnsureTabPageContainers(g_selectedIndex);
             }
         }
     }
@@ -381,6 +443,44 @@ namespace
 
 namespace
 {
+    HWND GetTabPageContainer(int tabIndex, int pageIndex);
+    void EnsureTabPageContainers(int tabIndex);
+    void UpdateTabPageVisibility(int tabIndex);
+
+    struct ParentInfo
+    {
+        HWND hwnd{};
+        RECT rect{};
+    };
+
+    ParentInfo GetParentInfoFor(const wui::ControlDef& c)
+    {
+        ParentInfo info{};
+        info.hwnd = g_hDesign;
+        GetClientRect(g_hDesign, &info.rect);
+
+        if (c.parentIndex >= 0 &&
+            c.parentIndex < static_cast<int>(CurrentControls().size()))
+        {
+            const auto& parentDef = CurrentControls()[c.parentIndex];
+            info.hwnd = EnsureControlCreated(c.parentIndex);
+            info.rect = parentDef.rect;
+
+            if (parentDef.type == wui::ControlType::Tab)
+            {
+                RECT pageRc{ 0, 0, parentDef.rect.right - parentDef.rect.left, parentDef.rect.bottom - parentDef.rect.top };
+                TabCtrl_AdjustRect(info.hwnd, FALSE, &pageRc);
+                info.rect.left += pageRc.left;
+                info.rect.top += pageRc.top;
+
+                const int pageIndex = c.tabPageId < 0 ? 0 : c.tabPageId;
+                info.hwnd = GetTabPageContainer(c.parentIndex, pageIndex);
+            }
+        }
+
+        return info;
+    }
+
     DWORD BuildStyleFlags(const wui::ControlDef& c)
     {
         // For preview we always ensure WS_CHILD | WS_VISIBLE;
@@ -424,17 +524,6 @@ namespace
 
     HWND EnsureControlCreated(int index);
 
-    HWND GetParentHwndFor(const wui::ControlDef& c, int index)
-    {
-        if (c.parentIndex >= 0 &&
-            c.parentIndex < static_cast<int>(g_hwndControls.size()))
-        {
-            HWND ph = EnsureControlCreated(c.parentIndex);
-            if (ph) return ph;
-        }
-        return g_hDesign;
-    }
-
     HWND EnsureControlCreated(int index)
     {
         if (index < 0 || index >= (int)CurrentControls().size())
@@ -449,19 +538,9 @@ namespace
 
         auto& c = CurrentControls()[index];
 
-        HWND parent = g_hDesign;
-        RECT parentRect{ 0,0,0,0 };
-
-        if (c.parentIndex >= 0 &&
-            c.parentIndex < (int)CurrentControls().size())
-        {
-            parent = EnsureControlCreated(c.parentIndex);
-            parentRect = CurrentControls()[c.parentIndex].rect;
-        }
-        else
-        {
-            GetClientRect(g_hDesign, &parentRect);
-        }
+        ParentInfo pinfo = GetParentInfoFor(c);
+        HWND parent = pinfo.hwnd ? pinfo.hwnd : g_hDesign;
+        RECT parentRect = pinfo.rect;
 
         // *** FIX 1: convert to parent-relative coordinates ***
         int absX = c.rect.left;
@@ -495,11 +574,152 @@ namespace
         g_hwndControls[index] = hCtrl;
         if (hCtrl) SubclassControl(hCtrl);
 
+        if (c.type == wui::ControlType::Tab)
+        {
+            if (hCtrl)
+            {
+                // Ensure we have at least two visible tabs by default
+                if (c.tabPages.empty())
+                    c.tabPages = { L"Page 1", L"Page 2" };
+
+                TCITEMW tci{};
+                tci.mask = TCIF_TEXT;
+                TabCtrl_DeleteAllItems(hCtrl);
+                for (size_t i = 0; i < c.tabPages.size(); ++i)
+                {
+                    tci.pszText = const_cast<wchar_t*>(c.tabPages[i].c_str());
+                    TabCtrl_InsertItem(hCtrl, static_cast<int>(i), &tci);
+                }
+                TabCtrl_SetCurSel(hCtrl, 0);
+                EnsureTabPageContainers(index);
+            }
+        }
+        else if (c.parentIndex >= 0 &&
+            c.parentIndex < static_cast<int>(CurrentControls().size()) &&
+            CurrentControls()[c.parentIndex].type == wui::ControlType::Tab)
+        {
+            // Ensure the parent's tab containers are materialized before children
+            EnsureTabPageContainers(c.parentIndex);
+        }
+
         return hCtrl ? hCtrl : parent;
+    }
+
+    void EnsureTabPageContainers(int tabIndex)
+    {
+        if (tabIndex < 0 || tabIndex >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        if (static_cast<size_t>(tabIndex) >= g_hwndControls.size())
+            return;
+
+        HWND hTab = g_hwndControls[tabIndex];
+        if (!hTab)
+            return;
+
+        auto& tabDef = CurrentControls()[tabIndex];
+        if (tabDef.tabPages.empty())
+            tabDef.tabPages = { L"Page 1", L"Page 2" };
+
+        const size_t pageCount = std::max<size_t>(1, tabDef.tabPages.size());
+        auto& containers = g_tabPageContainers[tabIndex];
+
+        RECT rc{ 0, 0, tabDef.rect.right - tabDef.rect.left, tabDef.rect.bottom - tabDef.rect.top };
+        TabCtrl_AdjustRect(hTab, FALSE, &rc);
+        const int pageW = std::max<int>(rc.right - rc.left, 4);
+        const int pageH = std::max<int>(rc.bottom - rc.top, 4);
+
+        if (containers.size() > pageCount)
+        {
+            for (size_t i = pageCount; i < containers.size(); ++i)
+            {
+                if (containers[i] && ::IsWindow(containers[i]))
+                    DestroyWindow(containers[i]);
+            }
+            containers.resize(pageCount);
+        }
+        else if (containers.size() < pageCount)
+        {
+            containers.resize(pageCount, nullptr);
+        }
+
+        for (size_t i = 0; i < pageCount; ++i)
+        {
+            HWND hPage = containers[i];
+            if (!hPage || !::IsWindow(hPage))
+            {
+                hPage = CreateWindowExW(
+                    0, L"STATIC", nullptr,
+                    WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    rc.left, rc.top, pageW, pageH,
+                    hTab, nullptr, g_hInst, nullptr);
+                containers[i] = hPage;
+            }
+
+            MoveWindow(hPage, rc.left, rc.top, pageW, pageH, TRUE);
+        }
+
+        UpdateTabPageVisibility(tabIndex);
+    }
+
+    HWND GetTabPageContainer(int tabIndex, int pageIndex)
+    {
+        EnsureTabPageContainers(tabIndex);
+
+        auto it = g_tabPageContainers.find(tabIndex);
+        if (it == g_tabPageContainers.end())
+            return (tabIndex < static_cast<int>(g_hwndControls.size())) ? g_hwndControls[tabIndex] : g_hDesign;
+
+        if (it->second.empty())
+            return (tabIndex < static_cast<int>(g_hwndControls.size())) ? g_hwndControls[tabIndex] : g_hDesign;
+
+        if (pageIndex < 0)
+            pageIndex = 0;
+        if (pageIndex >= static_cast<int>(it->second.size()))
+            pageIndex = static_cast<int>(it->second.size()) - 1;
+
+        return it->second[pageIndex];
+    }
+
+    void UpdateTabPageVisibility(int tabIndex)
+    {
+        auto it = g_tabPageContainers.find(tabIndex);
+        if (it == g_tabPageContainers.end())
+            return;
+
+        if (static_cast<size_t>(tabIndex) >= g_hwndControls.size())
+            return;
+
+        HWND hTab = g_hwndControls[tabIndex];
+        if (!hTab)
+            return;
+
+        int sel = TabCtrl_GetCurSel(hTab);
+        if (sel < 0)
+            sel = 0;
+
+        for (size_t i = 0; i < it->second.size(); ++i)
+        {
+            HWND hPage = it->second[i];
+            if (!hPage)
+                continue;
+
+            ShowWindow(hPage, (static_cast<int>(i) == sel) ? SW_SHOW : SW_HIDE);
+        }
     }
 
     void DestroyRuntimeControls()
     {
+        for (auto& kv : g_tabPageContainers)
+        {
+            for (HWND hPage : kv.second)
+            {
+                if (hPage && ::IsWindow(hPage))
+                    DestroyWindow(hPage);
+            }
+        }
+        g_tabPageContainers.clear();
+
         for (HWND h : g_hwndControls)
         {
             if (h && ::IsWindow(h))
@@ -545,6 +765,19 @@ namespace
                 out.push_back(c);
             else
                 out.push_back(L'_');
+        }
+        return out;
+    }
+
+    wstring escape_wstring_literal(const wstring& s)
+    {
+        wstring out;
+        out.reserve(s.size());
+        for (wchar_t ch : s)
+        {
+            if (ch == L'\\' || ch == L'"')
+                out.push_back(L'\\');
+            out.push_back(ch);
         }
         return out;
     }
@@ -612,7 +845,43 @@ namespace
             result += L"    hwndParent,\n";
             result += L"    (HMENU)(INT_PTR)" + idToken + L",\n";
             result += L"    hInst,\n";
-            result += L"    NULL);\n\n";
+            result += L"    NULL);\n";
+
+            if (c.type == wui::ControlType::Tab)
+            {
+                const auto& pages = TabPagesFor(c);
+                result += L"    {\n";
+                result += L"        TCITEMW tci{};\n";
+                result += L"        tci.mask = TCIF_TEXT;\n";
+                for (size_t pi = 0; pi < pages.size(); ++pi)
+                {
+                    result += L"        tci.pszText = const_cast<wchar_t*>(L\"";
+                    result += escape_wstring_literal(pages[pi]);
+                    result += L"\");\n";
+                    result += std::format(L"        TabCtrl_InsertItem({}, {}, &tci);\n", varName, pi);
+                }
+                result += L"    }\n";
+
+                result += std::format(L"// TAB_ITEMS id={}: ", c.id);
+                for (size_t pi = 0; pi < pages.size(); ++pi)
+                {
+                    result += pages[pi];
+                    if (pi + 1 < pages.size())
+                        result += L" | ";
+                }
+                result += L"\n\n";
+            }
+            else if (c.parentIndex >= 0 &&
+                c.parentIndex < static_cast<int>(CurrentControls().size()) &&
+                CurrentControls()[c.parentIndex].type == wui::ControlType::Tab)
+            {
+                const int page = std::max(0, c.tabPageId);
+                result += std::format(L"// TAB_PAGE id={} page={}\n\n", c.id, page);
+            }
+            else
+            {
+                result += L"\n";
+            }
         }
 
         return result;
@@ -790,6 +1059,8 @@ namespace
         c.id = 1000 + (int)CurrentControls().size();
         c.styleExpr = wui::default_style_expr(type);
         c.className = wui::DefaultClassName(type);
+        if (type == wui::ControlType::Tab)
+            c.tabPages = { L"Page 1", L"Page 2" };
         c.parentIndex = -1;
         c.isContainer = (type == wui::ControlType::GroupBox ||
             type == wui::ControlType::Tab ||
@@ -918,6 +1189,23 @@ namespace
             WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
             8, y, kPropPanelWidth - 16, 20,
             g_hPropPanel, (HMENU)(INT_PTR)213, g_hInst, nullptr);
+
+        y += 28;
+
+        g_hTabPageLabel = CreateWindowExW(
+            0, L"STATIC", L"Tab Page:",
+            WS_CHILD,
+            8, y + 4, 70, 20,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        g_hTabPageCombo = CreateWindowExW(
+            0, L"COMBOBOX", L"",
+            WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST,
+            80, y, kPropPanelWidth - 88, 200,
+            g_hPropPanel, (HMENU)(INT_PTR)214, g_hInst, nullptr);
+
+        ShowWindow(g_hTabPageLabel, SW_HIDE);
+        ShowWindow(g_hTabPageCombo, SW_HIDE);
     }
 
     void LayoutChildren(HWND hwnd)
@@ -958,6 +1246,35 @@ namespace
 }
 
 // -----------------------------------------------------------------------------
+// DESIGN SURFACE SUBCLASS (notifications, etc.)
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    LRESULT CALLBACK DesignWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        switch (msg)
+        {
+        case WM_NOTIFY:
+        {
+            auto hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (hdr && hdr->code == TCN_SELCHANGE)
+            {
+                int idx = FindControlIndexFromHwnd(hdr->hwndFrom);
+                if (idx >= 0)
+                    UpdateTabPageVisibility(idx);
+            }
+            break;
+        }
+        }
+
+        if (g_originalDesignProc)
+            return CallWindowProcW(g_originalDesignProc, hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+// -----------------------------------------------------------------------------
 // MAIN WINDOW PROC
 // -----------------------------------------------------------------------------
 
@@ -979,6 +1296,9 @@ namespace
                 WS_CHILD | WS_VISIBLE,
                 kDesignMargin, kDesignMargin, 400, 400,
                 hwnd, nullptr, g_hInst, nullptr);
+
+            g_originalDesignProc = (WNDPROC)GetWindowLongPtrW(g_hDesign, GWLP_WNDPROC);
+            SetWindowLongPtrW(g_hDesign, GWLP_WNDPROC, (LONG_PTR)DesignWndProc);
 
             CreatePropertyPanel(hwnd);
             BuildMenus(hwnd);
@@ -1036,6 +1356,36 @@ namespace
                 default:
                     break;
                 }
+            }
+
+            if (id == 214 && code == CBN_SELCHANGE && !g_inTabPageUpdate)
+            {
+                if (g_selectedIndex >= 0 &&
+                    g_selectedIndex < static_cast<int>(CurrentControls().size()))
+                {
+                    auto& c = CurrentControls()[g_selectedIndex];
+                    if (c.parentIndex >= 0 &&
+                        c.parentIndex < static_cast<int>(CurrentControls().size()) &&
+                        CurrentControls()[c.parentIndex].type == wui::ControlType::Tab)
+                    {
+                        int sel = static_cast<int>(SendMessageW(g_hTabPageCombo, CB_GETCURSEL, 0, 0));
+                        if (sel < 0) sel = 0;
+                        c.tabPageId = sel;
+                        const int tabIndex = c.parentIndex;
+                        RebuildRuntimeControls();
+                        if (tabIndex >= 0 && tabIndex < static_cast<int>(g_hwndControls.size()))
+                        {
+                            HWND hTab = g_hwndControls[tabIndex];
+                            if (hTab)
+                            {
+                                TabCtrl_SetCurSel(hTab, sel);
+                                UpdateTabPageVisibility(tabIndex);
+                            }
+                        }
+                        RefreshPropertyPanel();
+                    }
+                }
+                return 0;
             }
 
             switch (id)
