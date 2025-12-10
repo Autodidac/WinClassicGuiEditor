@@ -481,36 +481,81 @@ namespace
         RedrawDesignOverlay();
     }
 
-    void DrawSelectionOverlayNow()
+    RECT ModelRectToClient(const RECT& rc)
     {
-        if (!g_hDesign || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        // Model rectangles are stored in design-surface coordinates already, but this helper
+        // keeps the transformation explicit and future-proofs against scrollable surfaces.
+        RECT out = rc;
+        return out;
+    }
+
+    void DrawSelectionOverlay(HDC hdc)
+    {
+        if (!g_hDesign || !hdc || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
             return;
 
-        RECT rc = SelectedRect();
-        HDC hdc = GetWindowDC(g_hDesign);
-        if (!hdc)
+        const auto& c = CurrentControls()[g_selectedIndex];
+        RECT rc = ModelRectToClient(c.rect);
+        RECT client{};
+        GetClientRect(g_hDesign, &client);
+        if (!IntersectRect(&rc, &rc, &client))
             return;
 
         const COLORREF accent = RGB(0, 120, 215);
-        HPEN pen = CreatePen(PS_SOLID, 1, accent);
-        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, GetStockObject(NULL_BRUSH));
-        HPEN oldPen = (HPEN)SelectObject(hdc, pen);
+        const int oldBk = SetBkMode(hdc, TRANSPARENT);
+        const int originalRop = SetROP2(hdc, R2_NOTXORPEN);
+
+        HPEN dashPen = CreatePen(PS_DOT, 1, accent);
+        HBRUSH nullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+        HPEN oldPen = (HPEN)SelectObject(hdc, dashPen);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, nullBrush);
 
         Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
 
-        HBRUSH hBrush = CreateSolidBrush(accent);
-        HBRUSH oldHandleBrush = (HBRUSH)SelectObject(hdc, hBrush);
+        const int handleRop = SetROP2(hdc, R2_COPYPEN);
+        HPEN solidPen = CreatePen(PS_SOLID, 1, accent);
+        HBRUSH handleBrush = CreateSolidBrush(accent);
+        SelectObject(hdc, solidPen);
+        SelectObject(hdc, handleBrush);
         for (const auto& handleRc : BuildHandleRects(rc))
         {
             Rectangle(hdc, handleRc.left, handleRc.top, handleRc.right, handleRc.bottom);
         }
+        SetROP2(hdc, handleRop);
 
-        SelectObject(hdc, oldHandleBrush);
-        DeleteObject(hBrush);
+        // Alignment crosshairs
+        SelectObject(hdc, dashPen);
+        SetROP2(hdc, R2_NOTXORPEN);
+        const int midX = rc.left + (rc.right - rc.left) / 2;
+        const int midY = rc.top + (rc.bottom - rc.top) / 2;
+        MoveToEx(hdc, midX, rc.top, nullptr); LineTo(hdc, midX, rc.bottom);
+        MoveToEx(hdc, rc.left, midY, nullptr); LineTo(hdc, rc.right, midY);
+
+        // Label with control type to aid focus identification
+        std::wstring label = wui::ControlTypeLabel(c.type);
+        if (!c.text.empty())
+            label += L" | " + c.text;
+
+        SIZE textSize{};
+        GetTextExtentPoint32W(hdc, label.c_str(), static_cast<int>(label.size()), &textSize);
+        int textX = rc.left;
+        int textY = rc.top - textSize.cy - 2;
+        if (textY < client.top)
+            textY = rc.top + 2;
+
+        RECT textBg{ textX - 2, textY - 1, textX + textSize.cx + 2, textY + textSize.cy + 1 };
+        FillRect(hdc, &textBg, (HBRUSH)GetStockObject(WHITE_BRUSH));
+        SetTextColor(hdc, accent);
+        TextOutW(hdc, textX, textY, label.c_str(), static_cast<int>(label.size()));
+
+        // Restore GDI objects
         SelectObject(hdc, oldPen);
-        DeleteObject(pen);
         SelectObject(hdc, oldBrush);
-        ReleaseDC(g_hDesign, hdc);
+        SetBkMode(hdc, oldBk);
+        SetROP2(hdc, originalRop);
+        DeleteObject(dashPen);
+        DeleteObject(solidPen);
+        DeleteObject(handleBrush);
     }
 }
 
@@ -733,6 +778,13 @@ namespace
             }
             break;
         }
+
+        case WM_MOVE:
+        case WM_SIZE:
+        case WM_WINDOWPOSCHANGED:
+        case WM_SHOWWINDOW:
+            RedrawDesignOverlay();
+            break;
 
         case WM_LBUTTONUP:
         {
@@ -1035,6 +1087,8 @@ namespace
 
             ShowWindow(hPage, (static_cast<int>(i) == sel) ? SW_SHOW : SW_HIDE);
         }
+
+        RedrawDesignOverlay();
     }
 
     void DestroyRuntimeControls()
@@ -1639,9 +1693,9 @@ namespace
             if (hdc)
             {
                 FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+                DrawSelectionOverlay(hdc);
             }
             EndPaint(hwnd, &ps);
-            DrawSelectionOverlayNow();
             return 0;
         }
         }
