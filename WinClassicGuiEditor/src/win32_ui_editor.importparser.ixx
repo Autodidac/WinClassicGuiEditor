@@ -597,21 +597,33 @@ namespace win32_ui_editor::importparser::detail
                 }
 
                 // Extract class name
+                auto stripStringPrefix = [](const string& literal) -> string {
+                    if (literal.starts_with("u8\"") || literal.starts_with("u8'"))
+                        return literal.substr(2);
+                    if (literal.size() >= 2 &&
+                        (literal.front() == 'L' || literal.front() == 'u' || literal.front() == 'U') &&
+                        (literal[1] == '"' || literal[1] == '\''))
+                        return literal.substr(1);
+                    return literal;
+                    };
+
                 auto parseClass = [&](const string& cls) -> wstring {
-                    if (cls.starts_with("WC_"))
-                        return wstring(cls.begin(), cls.end()); // macro name
-                    if (cls.size() >= 2 && cls.front() == '"' && cls.back() == '"')
-                        return wstring(cls.begin() + 1, cls.end() - 1);
-                    return wstring(cls.begin(), cls.end());
+                    string normalized = stripStringPrefix(cls);
+                    if (normalized.starts_with("WC_"))
+                        return wstring(normalized.begin(), normalized.end()); // macro name
+                    if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"')
+                        return wstring(normalized.begin() + 1, normalized.end() - 1);
+                    return wstring(normalized.begin(), normalized.end());
                     };
 
                 wstring clsName = parseClass(classExpr);
 
                 // Extract text
                 auto parseText = [&](const string& s) -> wstring {
-                    if (s.size() >= 2 && s.front() == '"' && s.back() == '"')
-                        return wstring(s.begin() + 1, s.end() - 1);
-                    return wstring(s.begin(), s.end());
+                    string normalized = stripStringPrefix(s);
+                    if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"')
+                        return wstring(normalized.begin() + 1, normalized.end() - 1);
+                    return wstring(normalized.begin(), normalized.end());
                     };
 
                 wstring textW = parseText(textExpr);
