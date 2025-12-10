@@ -1,0 +1,91 @@
+// Control ID definitions
+#define ID_CTRL_1000 1000
+#define ID_CTRL_1001 1001
+#define ID_AUTOREFRESH 1002
+#define ID_CTRL_1003 1003
+#define ID_CTRL_1004 1004
+#define ID_CTRL_1005 1005
+#define ID_CTRL_1006 1006
+
+// Creation code (C / Win32)
+// Replace hwndParent with your parent window handle
+HWND hwndParent = hWnd;
+HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwndParent, GWLP_HINSTANCE);
+
+HWND hwnd_Static_0 = CreateWindowExW(
+    0,
+    L"STATIC",
+    L"L "AlmondSecurity Inspector"",
+    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+    0, 0, 1100, 700,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1000,
+    hInst,
+    NULL);
+
+HWND hwnd_Tab_1 = CreateWindowExW(
+    0,
+    L"BUTTON",
+    L"L """,
+    WS_CHILD | WS_VISIBLE | WS_CLIPSIBLINGS | WS_CLIPCHILDREN,
+    0, 0, 0, 28,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1001,
+    hInst,
+    NULL);
+
+HWND hwnd_Button_2 = CreateWindowExW(
+    0,
+    L"BUTTON",
+    L"L "Auto refresh"",
+    WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+    0, 4, 140, 20,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_AUTOREFRESH,
+    hInst,
+    NULL);
+
+HWND hwnd_ListView_3 = CreateWindowExW(
+    0,
+    L"BUTTON",
+    L"L """,
+    WS_CHILD | WS_VISIBLE | WS_TABSTOP | LVS_REPORT,
+    0, 28, 0, 448,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1003,
+    hInst,
+    NULL);
+
+HWND hwnd_Edit_4 = CreateWindowExW(
+    0,
+    L"EDIT",
+    L"L """,
+    WS_CHILD | WS_VISIBLE | ES_MULTILINE | ES_READONLY | ES_AUTOVSCROLL | WS_VSCROLL,
+    0, 476, 0, 224,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1004,
+    hInst,
+    NULL);
+
+HWND hwnd_Tooltip_5 = CreateWindowExW(
+    0,
+    L"BUTTON",
+    L"nullptr",
+    WS_POPUP | TTS_ALWAYSTIP | TTS_NOPREFIX,
+    0, 0, 0, 0,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1005,
+    hInst,
+    NULL);
+
+HWND hwnd_Static_6 = CreateWindowExW(
+    0,
+    L"STATIC",
+    L"L "Hex View"",
+    WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+    0, 0, 800, 500,
+    hwndParent,
+    (HMENU)(INT_PTR)ID_CTRL_1006,
+    hInst,
+    NULL);
+

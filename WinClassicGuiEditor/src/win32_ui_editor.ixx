@@ -1,0 +1,1128 @@
+module;
+#define NOMINMAX
+#include <windows.h>
+#include <windowsx.h>
+#include <commctrl.h>
+#include <commdlg.h>
+#include <fstream>
+
+#pragma comment(lib, "Comctl32.lib")
+
+export module win32_ui_editor;
+
+import std;
+import win32_ui_editor.model;
+import win32_ui_editor.importparser;
+
+namespace wui = win32_ui_editor::model;
+namespace wimp = win32_ui_editor::importparser;
+
+using std::wstring;
+using std::vector;
+using std::to_wstring;
+
+// -----------------------------------------------------------------------------
+// GLOBAL STATE
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    HINSTANCE g_hInst{};
+    HWND      g_hMain{};
+    HWND      g_hDesign{};
+    HWND      g_hPropPanel{};
+
+    constexpr int kDesignMargin = 8;
+    constexpr int kPropPanelWidth = 320;
+
+    // Property panel controls
+    HWND g_hPropEdits[6]{}; // X,Y,W,H,Text,ID
+    HWND g_hStyleEdit{};    // style expression textbox
+    HWND g_hStyleChkChild{};
+    HWND g_hStyleChkVisible{};
+    HWND g_hStyleChkTabstop{};
+    HWND g_hStyleChkBorder{};
+
+    bool g_inStyleUpdate{ false };
+
+    // Model
+    vector<wui::ControlDef> g_controls;
+    int   g_selectedIndex{ -1 };
+
+    // Runtime HWNDs per control index
+    vector<HWND> g_hwndControls;
+
+    // Subclassing map for live controls
+    std::unordered_map<HWND, WNDPROC> g_originalProcs;
+
+    auto& CurrentControls() noexcept { return g_controls; }
+
+    // Forward decl
+    void RefreshPropertyPanel();
+    void RebuildRuntimeControls();
+}
+
+// -----------------------------------------------------------------------------
+// UTILS
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    wstring get_window_text_w(HWND h)
+    {
+        const int len = GetWindowTextLengthW(h);
+        if (len <= 0) return {};
+        wstring s(static_cast<size_t>(len), L'\0');
+        GetWindowTextW(h, s.data(), len + 1);
+        return s;
+    }
+
+    void set_window_text_w(HWND h, const wstring& s)
+    {
+        SetWindowTextW(h, s.c_str());
+    }
+
+    void set_edit_int(HWND h, int value)
+    {
+        set_window_text_w(h, to_wstring(value));
+    }
+
+    int parse_int_or(const wstring& s, int fallback)
+    {
+        try
+        {
+            if (s.empty()) return fallback;
+            return std::stoi(s);
+        }
+        catch (...)
+        {
+            return fallback;
+        }
+    }
+
+    // Style string helpers for C: checkboxes + custom text
+    bool style_contains_flag(const wstring& expr, const wchar_t* flag)
+    {
+        return expr.find(flag) != wstring::npos;
+    }
+
+    void style_add_flag(wstring& expr, const wchar_t* flag)
+    {
+        if (style_contains_flag(expr, flag))
+            return;
+
+        if (expr.empty())
+            expr = flag;
+        else
+            expr += L" | " + wstring(flag);
+    }
+
+    void style_remove_flag(wstring& expr, const wchar_t* flag)
+    {
+        if (expr.empty())
+            return;
+
+        wstring f = flag;
+
+        auto erase_sub = [&](const wstring& what)
+            {
+                auto pos = expr.find(what);
+                if (pos != wstring::npos)
+                    expr.erase(pos, what.size());
+            };
+
+        erase_sub(L" | " + f);
+        erase_sub(f + L" | ");
+        erase_sub(f);
+
+        // Clean leftover "||"
+        for (;;)
+        {
+            auto pos = expr.find(L"||");
+            if (pos == wstring::npos)
+                break;
+            expr.erase(pos, 1);
+        }
+
+        // Trim spaces and stray '|'
+        while (!expr.empty() && (expr.front() == L' ' || expr.front() == L'|'))
+            expr.erase(expr.begin());
+        while (!expr.empty() && (expr.back() == L' ' || expr.back() == L'|'))
+            expr.pop_back();
+    }
+
+    void sync_style_checkboxes_from_expr(const wstring& expr)
+    {
+        if (!g_hStyleChkChild) return;
+        g_inStyleUpdate = true;
+
+        auto set_chk = [](HWND h, bool on)
+            {
+                if (h)
+                    SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
+            };
+
+        set_chk(g_hStyleChkChild, style_contains_flag(expr, L"WS_CHILD"));
+        set_chk(g_hStyleChkVisible, style_contains_flag(expr, L"WS_VISIBLE"));
+        set_chk(g_hStyleChkTabstop, style_contains_flag(expr, L"WS_TABSTOP"));
+        set_chk(g_hStyleChkBorder, style_contains_flag(expr, L"WS_BORDER"));
+
+        g_inStyleUpdate = false;
+    }
+
+    void apply_style_checkbox_change(HWND chk, const wchar_t* flag)
+    {
+        if (g_selectedIndex < 0 ||
+            g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        auto& c = CurrentControls()[g_selectedIndex];
+
+        const auto checked = (SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
+        if (checked)
+            style_add_flag(c.styleExpr, flag);
+        else
+            style_remove_flag(c.styleExpr, flag);
+
+        set_window_text_w(g_hStyleEdit, c.styleExpr);
+        sync_style_checkboxes_from_expr(c.styleExpr);
+    }
+
+    void SetSelectedIndex(int idx)
+    {
+        if (idx < -1 || idx >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        g_selectedIndex = idx;
+        RefreshPropertyPanel();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PROPERTY PANEL
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    enum class PropIndex
+    {
+        X = 0,
+        Y,
+        W,
+        H,
+        Text,
+        ID
+    };
+
+    void RefreshStylePanel(const wui::ControlDef& c)
+    {
+        if (!g_hStyleEdit) return;
+
+        wstring style = c.styleExpr.empty()
+            ? wui::default_style_expr(c.type)
+            : c.styleExpr;
+
+        g_inStyleUpdate = true;
+        set_window_text_w(g_hStyleEdit, style);
+        g_inStyleUpdate = false;
+
+        sync_style_checkboxes_from_expr(style);
+    }
+
+    void RefreshPropertyPanel()
+    {
+        if (!g_hPropPanel)
+            return;
+
+        if (g_selectedIndex < 0 ||
+            g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        {
+            for (HWND hEdit : g_hPropEdits)
+            {
+                if (hEdit)
+                    set_window_text_w(hEdit, L"");
+            }
+            if (g_hStyleEdit)
+                set_window_text_w(g_hStyleEdit, L"");
+            sync_style_checkboxes_from_expr(L"");
+            return;
+        }
+
+        const auto& c = CurrentControls()[g_selectedIndex];
+
+        const int x = c.rect.left;
+        const int y = c.rect.top;
+        const int w = c.rect.right - c.rect.left;
+        const int h = c.rect.bottom - c.rect.top;
+
+        set_edit_int(g_hPropEdits[(int)PropIndex::X], x);
+        set_edit_int(g_hPropEdits[(int)PropIndex::Y], y);
+        set_edit_int(g_hPropEdits[(int)PropIndex::W], w);
+        set_edit_int(g_hPropEdits[(int)PropIndex::H], h);
+
+        if (g_hPropEdits[(int)PropIndex::Text])
+            set_window_text_w(g_hPropEdits[(int)PropIndex::Text], c.text);
+
+        set_edit_int(g_hPropEdits[(int)PropIndex::ID], c.id);
+
+        RefreshStylePanel(c);
+    }
+
+    void ApplyPropertyChange(PropIndex idx)
+    {
+        if (g_selectedIndex < 0 ||
+            g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+            return;
+
+        auto& c = CurrentControls()[g_selectedIndex];
+
+        const int curX = c.rect.left;
+        const int curY = c.rect.top;
+        const int curW = c.rect.right - c.rect.left;
+        const int curH = c.rect.bottom - c.rect.top;
+
+        auto read_int = [&](PropIndex p, int current)
+            {
+                const int i = (int)p;
+                if (!g_hPropEdits[i])
+                    return current;
+                return parse_int_or(get_window_text_w(g_hPropEdits[i]), current);
+            };
+
+        const int newX = (idx == PropIndex::X) ? read_int(PropIndex::X, curX) : curX;
+        const int newY = (idx == PropIndex::Y) ? read_int(PropIndex::Y, curY) : curY;
+        const int newW = (idx == PropIndex::W) ? read_int(PropIndex::W, curW) : curW;
+        const int newH = (idx == PropIndex::H) ? read_int(PropIndex::H, curH) : curH;
+
+        c.rect.left = newX;
+        c.rect.top = newY;
+        c.rect.right = newX + std::max(newW, 4);
+        c.rect.bottom = newY + std::max(newH, 4);
+
+        if (idx == PropIndex::Text)
+        {
+            c.text = get_window_text_w(g_hPropEdits[(int)PropIndex::Text]);
+        }
+        else if (idx == PropIndex::ID)
+        {
+            c.id = read_int(PropIndex::ID, c.id);
+        }
+
+        // Live update HWND if it exists
+        if (g_selectedIndex >= 0 &&
+            g_selectedIndex < static_cast<int>(g_hwndControls.size()))
+        {
+            HWND h = g_hwndControls[g_selectedIndex];
+            if (h)
+            {
+                const int w = c.rect.right - c.rect.left;
+                const int hgt = c.rect.bottom - c.rect.top;
+                MoveWindow(h, c.rect.left, c.rect.top, w, hgt, TRUE);
+
+                if (idx == PropIndex::Text)
+                    set_window_text_w(h, c.text);
+            }
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// LIVE CONTROL SUBCLASSING (selection, basic behavior)
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    LRESULT CALLBACK ControlSubclassProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        auto it = g_originalProcs.find(hwnd);
+        WNDPROC orig = (it != g_originalProcs.end()) ? it->second : DefWindowProcW;
+
+        switch (msg)
+        {
+        case WM_LBUTTONDOWN:
+        {
+            // Map HWND back to control index
+            for (int i = 0; i < (int)g_hwndControls.size(); ++i)
+            {
+                if (g_hwndControls[i] == hwnd)
+                {
+                    SetSelectedIndex(i);
+                    break;
+                }
+            }
+            break;
+        }
+
+        case WM_CLOSE:
+            // Embedded children should not close in editor
+            return 0;
+        }
+
+        return CallWindowProcW(orig, hwnd, msg, wp, lp);
+    }
+
+    void SubclassControl(HWND h)
+    {
+        if (!h) return;
+        if (g_originalProcs.contains(h))
+            return;
+
+        WNDPROC orig = (WNDPROC)GetWindowLongPtrW(h, GWLP_WNDPROC);
+        if (!orig) return;
+
+        g_originalProcs[h] = orig;
+        SetWindowLongPtrW(h, GWLP_WNDPROC, (LONG_PTR)ControlSubclassProc);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// RUNTIME CONTROL CREATION
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    DWORD BuildStyleFlags(const wui::ControlDef& c)
+    {
+        // For preview we always ensure WS_CHILD | WS_VISIBLE;
+        // we OR some common flags if they appear in styleExpr.
+        DWORD style = WS_CHILD | WS_VISIBLE;
+
+        const wstring& expr = c.styleExpr;
+
+        if (style_contains_flag(expr, L"WS_TABSTOP"))
+            style |= WS_TABSTOP;
+        if (style_contains_flag(expr, L"ES_AUTOHSCROLL"))
+            style |= ES_AUTOHSCROLL;
+        if (style_contains_flag(expr, L"WS_BORDER"))
+            style |= WS_BORDER;
+        if (style_contains_flag(expr, L"LBS_NOTIFY"))
+            style |= LBS_NOTIFY;
+        if (style_contains_flag(expr, L"BS_GROUPBOX"))
+            style |= BS_GROUPBOX;
+        if (style_contains_flag(expr, L"BS_AUTOCHECKBOX"))
+            style |= BS_AUTOCHECKBOX;
+        if (style_contains_flag(expr, L"BS_AUTORADIOBUTTON"))
+            style |= BS_AUTORADIOBUTTON;
+        if (style_contains_flag(expr, L"CBS_DROPDOWNLIST"))
+            style |= CBS_DROPDOWNLIST;
+        if (style_contains_flag(expr, L"TBS_AUTOTICKS"))
+            style |= TBS_AUTOTICKS;
+        if (style_contains_flag(expr, L"LVS_REPORT"))
+            style |= LVS_REPORT;
+
+        // Editor semantics: buttons non-interactive (preview only)
+        if (c.type == wui::ControlType::Button ||
+            c.type == wui::ControlType::Checkbox ||
+            c.type == wui::ControlType::Radio ||
+            c.type == wui::ControlType::GroupBox)
+        {
+            style |= WS_DISABLED;
+        }
+
+        return style;
+    }
+
+    HWND EnsureControlCreated(int index);
+
+    HWND GetParentHwndFor(const wui::ControlDef& c, int index)
+    {
+        if (c.parentIndex >= 0 &&
+            c.parentIndex < static_cast<int>(g_hwndControls.size()))
+        {
+            HWND ph = EnsureControlCreated(c.parentIndex);
+            if (ph) return ph;
+        }
+        return g_hDesign;
+    }
+
+    HWND EnsureControlCreated(int index)
+    {
+        if (index < 0 || index >= (int)CurrentControls().size())
+            return g_hDesign;
+
+        // already created?
+        if (index < (int)g_hwndControls.size() && g_hwndControls[index])
+            return g_hwndControls[index];
+
+        if ((int)g_hwndControls.size() < (int)CurrentControls().size())
+            g_hwndControls.resize(CurrentControls().size(), nullptr);
+
+        auto& c = CurrentControls()[index];
+
+        HWND parent = g_hDesign;
+        RECT parentRect{ 0,0,0,0 };
+
+        if (c.parentIndex >= 0 &&
+            c.parentIndex < (int)CurrentControls().size())
+        {
+            parent = EnsureControlCreated(c.parentIndex);
+            parentRect = CurrentControls()[c.parentIndex].rect;
+        }
+        else
+        {
+            GetClientRect(g_hDesign, &parentRect);
+        }
+
+        // *** FIX 1: convert to parent-relative coordinates ***
+        int absX = c.rect.left;
+        int absY = c.rect.top;
+        int absW = c.rect.right - c.rect.left;
+        int absH = c.rect.bottom - c.rect.top;
+
+        int relX = absX - parentRect.left;
+        int relY = absY - parentRect.top;
+
+        wstring cls = wui::DefaultClassName(c.type);
+        DWORD style = BuildStyleFlags(c);
+
+        // *** FIX 2: prevent controls covering everything ***
+        style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
+
+        HWND hCtrl = CreateWindowExW(
+            0,
+            cls.c_str(),
+            c.text.c_str(),
+            style,
+            relX,
+            relY,
+            std::max(absW, 4),
+            std::max(absH, 4),
+            parent,
+            (HMENU)(INT_PTR)c.id,
+            g_hInst,
+            nullptr);
+
+        g_hwndControls[index] = hCtrl;
+        if (hCtrl) SubclassControl(hCtrl);
+
+        return hCtrl ? hCtrl : parent;
+    }
+
+    void DestroyRuntimeControls()
+    {
+        for (HWND h : g_hwndControls)
+        {
+            if (h && ::IsWindow(h))
+                DestroyWindow(h);
+        }
+        g_hwndControls.clear();
+        g_originalProcs.clear();
+    }
+
+    void RebuildRuntimeControls()
+    {
+        DestroyRuntimeControls();
+
+        g_hwndControls.resize(CurrentControls().size(), nullptr);
+
+        for (int i = 0; i < (int)CurrentControls().size(); ++i)
+            EnsureControlCreated(i);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// EXPORT (C-style Win32 CreateWindowExW)
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    wstring sanitize_identifier(const wstring& s)
+    {
+        if (s.empty()) return L"ID_CTRL";
+
+        wstring out;
+        out.reserve(s.size());
+
+        wchar_t c0 = s[0];
+        if (!(std::iswalpha(c0) || c0 == L'_'))
+            out.push_back(L'_');
+        out.push_back(c0);
+
+        for (size_t i = 1; i < s.size(); ++i)
+        {
+            wchar_t c = s[i];
+            if (std::iswalnum(c) || c == L'_')
+                out.push_back(c);
+            else
+                out.push_back(L'_');
+        }
+        return out;
+    }
+
+    wstring BuildExportText()
+    {
+        if (CurrentControls().empty())
+            return L"// No controls defined.\n";
+
+        std::wstring result;
+
+        // ID definitions
+        result += L"// Control ID definitions\n";
+        std::unordered_set<int> seenIds;
+        for (auto const& c : CurrentControls())
+        {
+            if (seenIds.contains(c.id))
+                continue;
+            seenIds.insert(c.id);
+
+            wstring idToken = !c.idName.empty()
+                ? c.idName
+                : (L"ID_CTRL_" + to_wstring(c.id));
+
+            idToken = sanitize_identifier(idToken);
+            result += L"#define " + idToken + L" " + to_wstring(c.id) + L"\n";
+        }
+
+        result += L"\n// Creation code (C / Win32)\n";
+        result += L"// Replace hwndParent with your parent window handle\n";
+        result += L"HWND hwndParent = hWnd;\n";
+        result += L"HINSTANCE hInst = (HINSTANCE)GetWindowLongPtrW(hwndParent, GWLP_HINSTANCE);\n\n";
+
+        for (size_t i = 0; i < CurrentControls().size(); ++i)
+        {
+            const auto& c = CurrentControls()[i];
+
+            const int x = c.rect.left;
+            const int y = c.rect.top;
+            const int w = c.rect.right - c.rect.left;
+            const int h = c.rect.bottom - c.rect.top;
+
+            wstring idToken = !c.idName.empty()
+                ? c.idName
+                : (L"ID_CTRL_" + to_wstring(c.id));
+
+            idToken = sanitize_identifier(idToken);
+
+            wstring styleToken = !c.styleExpr.empty()
+                ? c.styleExpr
+                : wui::default_style_expr(c.type);
+
+            const std::wstring className = wui::DefaultClassName(c.type);
+
+            wstring varName = std::format(L"hwnd_{}_{}",
+                wui::ControlTypeLabel(c.type),
+                i);
+
+            result += L"HWND " + varName + L" = CreateWindowExW(\n";
+            result += L"    0,\n";
+            result += L"    L\"" + className + L"\",\n";
+            result += L"    L\"" + c.text + L"\",\n";
+            result += L"    " + styleToken + L",\n";
+            result += std::format(L"    {}, {}, {}, {},\n", x, y, w, h);
+            result += L"    hwndParent,\n";
+            result += L"    (HMENU)(INT_PTR)" + idToken + L",\n";
+            result += L"    hInst,\n";
+            result += L"    NULL);\n\n";
+        }
+
+        return result;
+    }
+
+    void ExportLayoutToClipboard()
+    {
+        std::wstring result = BuildExportText();
+
+        const size_t bytes = (result.size() + 1) * sizeof(wchar_t);
+        HGLOBAL hMem = GlobalAlloc(GMEM_MOVEABLE, bytes);
+        if (!hMem)
+            return;
+
+        void* p = GlobalLock(hMem);
+        std::memcpy(p, result.c_str(), bytes);
+        GlobalUnlock(hMem);
+
+        if (OpenClipboard(g_hMain))
+        {
+            EmptyClipboard();
+            SetClipboardData(CF_UNICODETEXT, hMem);
+            CloseClipboard();
+        }
+        else
+        {
+            GlobalFree(hMem);
+        }
+
+        MessageBoxW(g_hMain,
+            L"Exported layout as C / Win32 CreateWindowExW code to clipboard.\n"
+            L"(IDs emitted as #define macros.)",
+            L"Export",
+            MB_OK | MB_ICONINFORMATION);
+    }
+
+    void ExportLayoutToFile()
+    {
+        std::wstring result = BuildExportText();
+
+        wchar_t pathBuf[MAX_PATH] = L"layout_export.c";
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = g_hMain;
+        ofn.lpstrFilter = L"C Source\0*.c;*.cpp;*.txt\0All Files\0*.*\0\0";
+        ofn.lpstrFile = pathBuf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.lpstrTitle = L"Save exported layout";
+        ofn.Flags = OFN_OVERWRITEPROMPT | OFN_PATHMUSTEXIST;
+
+        if (!GetSaveFileNameW(&ofn))
+            return;
+
+        std::ofstream out(pathBuf, std::ios::binary);
+        if (!out)
+        {
+            MessageBoxW(g_hMain, L"Failed to open file for writing.", L"Export", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        // encode as UTF-8
+        int utf8Len = WideCharToMultiByte(CP_UTF8, 0,
+            result.c_str(),
+            (int)result.size(),
+            nullptr, 0, nullptr, nullptr);
+        std::string utf8;
+        utf8.resize(utf8Len);
+        WideCharToMultiByte(CP_UTF8, 0,
+            result.c_str(),
+            (int)result.size(),
+            utf8.data(), utf8Len,
+            nullptr, nullptr);
+        out.write(utf8.data(), utf8.size());
+        out.close();
+
+        MessageBoxW(g_hMain, L"Exported layout to file.", L"Export", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// IMPORT ENTRY (uses parser module, then builds live preview)
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    void ImportFromCppSource()
+    {
+        wchar_t pathBuf[MAX_PATH] = L"";
+        OPENFILENAMEW ofn{};
+        ofn.lStructSize = sizeof(ofn);
+        ofn.hwndOwner = g_hMain;
+        ofn.lpstrFilter = L"C/C++ Files\0*.c;*.cpp;*.cxx;*.ixx;*.hpp;*.h\0All Files\0*.*\0\0";
+        ofn.lpstrFile = pathBuf;
+        ofn.nMaxFile = MAX_PATH;
+        ofn.Flags = OFN_FILEMUSTEXIST | OFN_PATHMUSTEXIST;
+        ofn.lpstrTitle = L"Import UI from C/C++ source";
+
+        if (!GetOpenFileNameW(&ofn))
+            return;
+
+        std::ifstream in(pathBuf, std::ios::binary);
+        if (!in)
+        {
+            MessageBoxW(g_hMain, L"Failed to open file.", L"Import", MB_OK | MB_ICONERROR);
+            return;
+        }
+
+        std::string code((std::istreambuf_iterator<char>(in)),
+            std::istreambuf_iterator<char>());
+
+        auto imported = wimp::parse_controls_from_code(code);
+
+        CurrentControls() = std::move(imported);
+
+        for (size_t i = 0; i < CurrentControls().size(); ++i)
+        {
+            auto& c = CurrentControls()[i];
+            if (c.id <= 0)
+                c.id = 1000 + static_cast<int>(i);
+            if (c.styleExpr.empty())
+                c.styleExpr = wui::default_style_expr(c.type);
+        }
+
+        g_selectedIndex = CurrentControls().empty() ? -1 : 0;
+
+        RebuildRuntimeControls();
+        RefreshPropertyPanel();
+
+        wchar_t msg[128];
+        std::swprintf(msg, std::size(msg),
+            L"Imported %zu controls from source.", CurrentControls().size());
+        MessageBoxW(g_hMain, msg, L"Import", MB_OK | MB_ICONINFORMATION);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// MENU + COMMANDS
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    enum : UINT
+    {
+        IDM_NEW = 1,
+        IDM_EXPORT,
+        IDM_EXPORT_FILE,
+        IDM_IMPORT,
+
+        IDM_ADD_STATIC,
+        IDM_ADD_BUTTON,
+        IDM_ADD_EDIT,
+        IDM_ADD_CHECK,
+        IDM_ADD_RADIO,
+        IDM_ADD_GROUP,
+        IDM_ADD_LIST,
+        IDM_ADD_COMBO,
+        IDM_ADD_PROGRESS,
+        IDM_ADD_SLIDER,
+        IDM_ADD_TAB
+    };
+
+    void AddControl(wui::ControlType type)
+    {
+        RECT rc{ 20, 20, 150, 40 };
+        if (!CurrentControls().empty())
+        {
+            rc = CurrentControls().back().rect;
+            OffsetRect(&rc, 10, 10);
+        }
+
+        wui::ControlDef c{};
+        c.type = type;
+        c.rect = rc;
+        c.text = wui::ControlTypeLabel(type);
+        c.id = 1000 + (int)CurrentControls().size();
+        c.styleExpr = wui::default_style_expr(type);
+        c.className = wui::DefaultClassName(type);
+        c.parentIndex = -1;
+        c.isContainer = (type == wui::ControlType::GroupBox ||
+            type == wui::ControlType::Tab ||
+            type == wui::ControlType::ListBox ||
+            type == wui::ControlType::ComboBox ||
+            type == wui::ControlType::ListView);
+
+        CurrentControls().push_back(std::move(c));
+        g_selectedIndex = (int)CurrentControls().size() - 1;
+
+        RebuildRuntimeControls();
+        RefreshPropertyPanel();
+    }
+
+    void BuildMenus(HWND hwnd)
+    {
+        HMENU hMenuBar = CreateMenu();
+        HMENU hFile = CreateMenu();
+        HMENU hInsert = CreateMenu();
+
+        AppendMenuW(hFile, MF_STRING, IDM_NEW, L"&New");
+        AppendMenuW(hFile, MF_STRING, IDM_EXPORT, L"E&xport to Clipboard");
+        AppendMenuW(hFile, MF_STRING, IDM_EXPORT_FILE, L"Export to &File...");
+        AppendMenuW(hFile, MF_STRING, IDM_IMPORT, L"&Import from C/C++...");
+
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_STATIC, L"Static");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_BUTTON, L"Button");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_EDIT, L"Edit");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_CHECK, L"Checkbox");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_RADIO, L"Radio");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_GROUP, L"GroupBox");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_LIST, L"ListBox");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_COMBO, L"ComboBox");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_PROGRESS, L"Progress");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_SLIDER, L"Slider");
+        AppendMenuW(hInsert, MF_STRING, IDM_ADD_TAB, L"Tab Control");
+
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
+        AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hInsert, L"&Insert");
+
+        SetMenu(hwnd, hMenuBar);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PROPERTY PANEL CREATION + LAYOUT
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    void CreatePropertyPanel(HWND hwnd)
+    {
+        g_hPropPanel = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"STATIC", nullptr,
+            WS_CHILD | WS_VISIBLE,
+            0, 0, kPropPanelWidth, 0,
+            hwnd, nullptr, g_hInst, nullptr);
+
+        const wchar_t* labels[] = { L"X:", L"Y:", L"W:", L"H:", L"Text:", L"ID:" };
+        const int labelCount = 6;
+
+        int y = 8;
+        for (int i = 0; i < labelCount; ++i)
+        {
+            CreateWindowExW(
+                0, L"STATIC", labels[i],
+                WS_CHILD | WS_VISIBLE,
+                8, y + 4, 40, 20,
+                g_hPropPanel, nullptr, g_hInst, nullptr);
+
+            g_hPropEdits[i] = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"EDIT", L"",
+                WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+                52, y, kPropPanelWidth - 60, 22,
+                g_hPropPanel, (HMENU)(INT_PTR)(100 + i), g_hInst, nullptr);
+
+            y += 28;
+        }
+
+        // Style label
+        CreateWindowExW(
+            0, L"STATIC", L"Style:",
+            WS_CHILD | WS_VISIBLE,
+            8, y + 4, 50, 20,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        g_hStyleEdit = CreateWindowExW(
+            WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
+            60, y, kPropPanelWidth - 68, 22,
+            g_hPropPanel, (HMENU)(INT_PTR)200, g_hInst, nullptr);
+
+        y += 28;
+
+        CreateWindowExW(
+            0, L"STATIC", L"Common flags:",
+            WS_CHILD | WS_VISIBLE,
+            8, y + 4, 100, 20,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        y += 24;
+
+        g_hStyleChkChild = CreateWindowExW(
+            0, L"BUTTON", L"WS_CHILD",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            8, y, kPropPanelWidth - 16, 20,
+            g_hPropPanel, (HMENU)(INT_PTR)210, g_hInst, nullptr);
+
+        y += 22;
+        g_hStyleChkVisible = CreateWindowExW(
+            0, L"BUTTON", L"WS_VISIBLE",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            8, y, kPropPanelWidth - 16, 20,
+            g_hPropPanel, (HMENU)(INT_PTR)211, g_hInst, nullptr);
+
+        y += 22;
+        g_hStyleChkTabstop = CreateWindowExW(
+            0, L"BUTTON", L"WS_TABSTOP",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            8, y, kPropPanelWidth - 16, 20,
+            g_hPropPanel, (HMENU)(INT_PTR)212, g_hInst, nullptr);
+
+        y += 22;
+        g_hStyleChkBorder = CreateWindowExW(
+            0, L"BUTTON", L"WS_BORDER",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX,
+            8, y, kPropPanelWidth - 16, 20,
+            g_hPropPanel, (HMENU)(INT_PTR)213, g_hInst, nullptr);
+    }
+
+    void LayoutChildren(HWND hwnd)
+    {
+        RECT rcClient{};
+        GetClientRect(hwnd, &rcClient);
+
+        const int propW = kPropPanelWidth;
+        const int designRight = rcClient.right - propW;
+
+        if (g_hDesign)
+        {
+            int w = std::max<int>(designRight - 2 * kDesignMargin, 100);
+            int h = std::max<int>(rcClient.bottom - 2 * kDesignMargin, 100);
+
+            MoveWindow(
+                g_hDesign,
+                kDesignMargin,
+                kDesignMargin,
+                w,
+                h,
+                TRUE
+            );
+        }
+
+        if (g_hPropPanel)
+        {
+            MoveWindow(
+                g_hPropPanel,
+                designRight,
+                0,
+                propW,
+                rcClient.bottom,
+                TRUE
+            );
+        }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// MAIN WINDOW PROC
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        switch (msg)
+        {
+        case WM_CREATE:
+        {
+            INITCOMMONCONTROLSEX icc{};
+            icc.dwSize = sizeof(icc);
+            icc.dwICC = ICC_WIN95_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
+            InitCommonControlsEx(&icc);
+
+            g_hDesign = CreateWindowExW(
+                WS_EX_CLIENTEDGE, L"STATIC", nullptr,
+                WS_CHILD | WS_VISIBLE,
+                kDesignMargin, kDesignMargin, 400, 400,
+                hwnd, nullptr, g_hInst, nullptr);
+
+            CreatePropertyPanel(hwnd);
+            BuildMenus(hwnd);
+            LayoutChildren(hwnd);
+
+            return 0;
+        }
+        case WM_SIZE:
+            LayoutChildren(hwnd);
+            return 0;
+
+        case WM_COMMAND:
+        {
+            const int id = LOWORD(wp);
+            const int code = HIWORD(wp);
+
+            // Property edits
+            if (id >= 100 && id < 106 && code == EN_CHANGE)
+            {
+                const int idx = id - 100;
+                ApplyPropertyChange((PropIndex)idx);
+                return 0;
+            }
+
+            // Style text edit
+            if (id == 200 && code == EN_CHANGE && !g_inStyleUpdate)
+            {
+                if (g_selectedIndex >= 0 &&
+                    g_selectedIndex < (int)CurrentControls().size())
+                {
+                    auto& c = CurrentControls()[g_selectedIndex];
+                    c.styleExpr = get_window_text_w(g_hStyleEdit);
+                    sync_style_checkboxes_from_expr(c.styleExpr);
+                }
+                return 0;
+            }
+
+            // Style checkboxes
+            if (!g_inStyleUpdate)
+            {
+                switch (id)
+                {
+                case 210:
+                    apply_style_checkbox_change(g_hStyleChkChild, L"WS_CHILD");
+                    return 0;
+                case 211:
+                    apply_style_checkbox_change(g_hStyleChkVisible, L"WS_VISIBLE");
+                    return 0;
+                case 212:
+                    apply_style_checkbox_change(g_hStyleChkTabstop, L"WS_TABSTOP");
+                    return 0;
+                case 213:
+                    apply_style_checkbox_change(g_hStyleChkBorder, L"WS_BORDER");
+                    return 0;
+                default:
+                    break;
+                }
+            }
+
+            switch (id)
+            {
+            case IDM_NEW:
+                CurrentControls().clear();
+                g_selectedIndex = -1;
+                RebuildRuntimeControls();
+                RefreshPropertyPanel();
+                return 0;
+
+            case IDM_EXPORT:
+                ExportLayoutToClipboard();
+                return 0;
+
+            case IDM_EXPORT_FILE:
+                ExportLayoutToFile();
+                return 0;
+
+            case IDM_IMPORT:
+                ImportFromCppSource();
+                return 0;
+
+            case IDM_ADD_STATIC:   AddControl(wui::ControlType::Static);   return 0;
+            case IDM_ADD_BUTTON:   AddControl(wui::ControlType::Button);   return 0;
+            case IDM_ADD_EDIT:     AddControl(wui::ControlType::Edit);     return 0;
+            case IDM_ADD_CHECK:    AddControl(wui::ControlType::Checkbox); return 0;
+            case IDM_ADD_RADIO:    AddControl(wui::ControlType::Radio);    return 0;
+            case IDM_ADD_GROUP:    AddControl(wui::ControlType::GroupBox); return 0;
+            case IDM_ADD_LIST:     AddControl(wui::ControlType::ListBox);  return 0;
+            case IDM_ADD_COMBO:    AddControl(wui::ControlType::ComboBox); return 0;
+            case IDM_ADD_PROGRESS: AddControl(wui::ControlType::Progress); return 0;
+            case IDM_ADD_SLIDER:   AddControl(wui::ControlType::Slider);   return 0;
+            case IDM_ADD_TAB:      AddControl(wui::ControlType::Tab);      return 0;
+
+            default:
+                break;
+            }
+            break;
+        }
+
+        case WM_DESTROY:
+            DestroyRuntimeControls();
+            PostQuitMessage(0);
+            return 0;
+        }
+
+        return DefWindowProcW(hwnd, msg, wp, lp);
+    }
+}
+
+// -----------------------------------------------------------------------------
+// PUBLIC ENTRYPOINT
+// -----------------------------------------------------------------------------
+
+export int RunWin32UIEditor(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
+{
+    g_hInst = hInst;
+
+    WNDCLASSW wc{};
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = MainWndProc;
+    wc.hInstance = hInst;
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.lpszClassName = L"WIN32_UI_EDITOR";
+
+    if (!RegisterClassW(&wc))
+        return 0;
+
+    g_hMain = CreateWindowExW(
+        0, L"WIN32_UI_EDITOR", L"Win32 UI Editor",
+        WS_OVERLAPPEDWINDOW | WS_VISIBLE,
+        CW_USEDEFAULT, CW_USEDEFAULT, 1200, 750,
+        nullptr, nullptr, hInst, nullptr);
+
+    if (!g_hMain)
+        return 0;
+
+    ShowWindow(g_hMain, nCmdShow);
+    UpdateWindow(g_hMain);
+
+    MSG msg{};
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0)
+    {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    return (int)msg.wParam;
+}

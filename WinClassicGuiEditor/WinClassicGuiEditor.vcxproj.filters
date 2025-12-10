@@ -15,28 +15,16 @@
     </Filter>
   </ItemGroup>
   <ItemGroup>
-    <ClCompile Include="src\project.entry.win.ixx">
+    <ClCompile Include="src\main.cpp">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\project.entry.ixx">
+    <ClCompile Include="src\win32_ui_editor.importparser.ixx">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\project.console.ixx">
+    <ClCompile Include="src\win32_ui_editor.ixx">
       <Filter>Source Files</Filter>
     </ClCompile>
-    <ClCompile Include="src\project.ui.layout.ixx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\project.ui.ids.ixx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\project.timing.ixx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\project.log.ixx">
-      <Filter>Source Files</Filter>
-    </ClCompile>
-    <ClCompile Include="src\project.engine.config.ixx">
+    <ClCompile Include="src\win32_ui_editor.model.ixx">
       <Filter>Source Files</Filter>
     </ClCompile>
   </ItemGroup>

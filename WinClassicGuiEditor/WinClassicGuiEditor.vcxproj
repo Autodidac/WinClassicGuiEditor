@@ -18,23 +18,12 @@
       <Platform>x64</Platform>
     </ProjectConfiguration>
   </ItemGroup>
-  <ItemGroup>
-    <ClCompile Include="src\project.console.ixx" />
-    <ClCompile Include="src\project.engine.config.ixx" />
-    <ClCompile Include="src\project.entry.ixx" />
-    <ClCompile Include="src\project.entry.win.ixx" />
-    <ClCompile Include="src\project.log.ixx" />
-    <ClCompile Include="src\project.timing.ixx" />
-    <ClCompile Include="src\project.ui.ids.ixx" />
-    <ClCompile Include="src\project.ui.layout.ixx" />
-  </ItemGroup>
   <PropertyGroup Label="Globals">
     <VCProjectVersion>18.0</VCProjectVersion>
     <Keyword>Win32Proj</Keyword>
-    <ProjectGuid>{9217259e-282d-410d-85a2-6c214f3ae388}</ProjectGuid>
-    <RootNamespace>AutoWinMain</RootNamespace>
+    <ProjectGuid>{8820a7bf-b191-4d77-9352-90af3af672ef}</ProjectGuid>
+    <RootNamespace>WinClassicGuiEditor</RootNamespace>
     <WindowsTargetPlatformVersion>10.0</WindowsTargetPlatformVersion>
-    <ProjectName>Cpp23 Basic Project Template</ProjectName>
   </PropertyGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.Default.props" />
   <PropertyGroup Condition="'$(Configuration)|$(Platform)'=='Debug|Win32'" Label="Configuration">
@@ -139,6 +128,12 @@
       <GenerateDebugInformation>true</GenerateDebugInformation>
     </Link>
   </ItemDefinitionGroup>
+  <ItemGroup>
+    <ClCompile Include="src\main.cpp" />
+    <ClCompile Include="src\win32_ui_editor.importparser.ixx" />
+    <ClCompile Include="src\win32_ui_editor.ixx" />
+    <ClCompile Include="src\win32_ui_editor.model.ixx" />
+  </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">
   </ImportGroup>

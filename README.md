@@ -1,14 +1,41 @@
-# Cpp_Repo_Template
+Win32UIEditor
+==============
 
-## Header Size 2
+Classic Win32 form editor implemented in C++23 with a module-based core.
 
-### Header Size 3
+Features
+--------
 
+- Pure Win32 API (no MFC, no .NET, no ImGui).
+- Design surface: drag controls around with the mouse, arrow keys to nudge.
+- Property panel: edit X/Y/W/H/Text/ID for the selected control.
+- Toolbox via menu: insert Static, Button, Edit, Checkbox, Radio, GroupBox, ListBox, ComboBox, Progress, Slider.
+- Export to clipboard: generates C++ `CreateWindowExW` code and an `enum class ControlId`.
 
+Building with CMake + MSVC (recommended)
+----------------------------------------
 
----
+```bash
+mkdir build
+cd build
+cmake -G "Visual Studio 17 2022" -A x64 ..
+cmake --build . --config Release
+```
 
-#### Template Repo
+You may substitute the generator with your Visual Studio 2026 generator once available.
 
+Opening directly in Visual Studio
+---------------------------------
 
-- A Public Template Repo To Clone From
+- Open `Win32UIEditor.sln` in Visual Studio.
+- Build the `Win32UIEditor` project (x64 Debug or Release).
+- Run it (it creates a classic Win32 top-level editor window).
+
+Usage
+-----
+
+1. Insert controls from the **Insert** menu.
+2. Drag them on the canvas to place them.
+3. Use the property panel to set **X, Y, W, H, Text, ID**.
+4. Use **File → Export to Clipboard**.
+5. Paste the generated code into your own Win32 UI module (WM_CREATE or initialization path).
