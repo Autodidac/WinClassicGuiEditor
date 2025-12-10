@@ -374,6 +374,66 @@ namespace win32_ui_editor::importparser::detail
     }
 
     // =====================================================================
+    // Tab metadata helpers
+    // =====================================================================
+    string trim_copy(string s)
+    {
+        auto notSpace = [](unsigned char ch) { return !std::isspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
+    }
+
+    vector<wstring> split_tab_labels(const string& labels)
+    {
+        vector<wstring> pages;
+        size_t start = 0;
+        while (start < labels.size())
+        {
+            size_t bar = labels.find('|', start);
+            string part = (bar == string::npos)
+                ? labels.substr(start)
+                : labels.substr(start, bar - start);
+            part = trim_copy(part);
+            if (!part.empty())
+                pages.emplace_back(part.begin(), part.end());
+            if (bar == string::npos)
+                break;
+            start = bar + 1;
+        }
+        return pages;
+    }
+
+    void extract_tab_metadata(
+        const string& input,
+        std::unordered_map<int, vector<wstring>>& tabItems,
+        std::unordered_map<int, int>& tabPageAssignments)
+    {
+        std::istringstream iss(input);
+        std::regex reItems(R"(TAB_ITEMS\s+id\s*=\s*([0-9]+)\s*:(.*))");
+        std::regex rePage(R"(TAB_PAGE\s+id\s*=\s*([0-9]+)\s+page\s*=\s*([0-9]+))");
+
+        string line;
+        while (std::getline(iss, line))
+        {
+            std::smatch m;
+            if (std::regex_search(line, m, reItems))
+            {
+                const int id = std::stoi(m[1].str());
+                auto pages = split_tab_labels(m[2].str());
+                if (!pages.empty())
+                    tabItems[id] = std::move(pages);
+            }
+            else if (std::regex_search(line, m, rePage))
+            {
+                const int id = std::stoi(m[1].str());
+                const int page = std::stoi(m[2].str());
+                tabPageAssignments[id] = page;
+            }
+        }
+    }
+
+    // =====================================================================
     // Infer container hierarchy from geometry
     // =====================================================================
     void build_container_hierarchy(vector<ControlDef>& controls)
@@ -433,6 +493,11 @@ namespace win32_ui_editor::importparser::detail
     // =====================================================================
     vector<ControlDef> parseFromCode(const string& originalInput)
     {
+        // Preserve comments for tab metadata extraction
+        std::unordered_map<int, vector<wstring>> tabItems;
+        std::unordered_map<int, int> tabPageAssignments;
+        extract_tab_metadata(originalInput, tabItems, tabPageAssignments);
+
         // Pre-clean
         string input = strip_comments(originalInput);
 
@@ -614,6 +679,47 @@ namespace win32_ui_editor::importparser::detail
                 c.id = 1000 + static_cast<int>(i);
             if (c.styleExpr.empty())
                 c.styleExpr = win32_ui_editor::model::default_style_expr(c.type);
+        }
+
+        // Apply tab metadata and defaults
+        for (auto& c : controls)
+        {
+            if (c.type == ControlType::Tab)
+            {
+                auto it = tabItems.find(c.id);
+                if (it != tabItems.end())
+                    c.tabPages = it->second;
+                else if (!c.text.empty())
+                    c.tabPages = split_tab_labels(std::string(c.text.begin(), c.text.end()));
+
+                if (c.tabPages.empty())
+                    c.tabPages = { L"Page 1", L"Page 2" };
+            }
+        }
+
+        for (auto& c : controls)
+        {
+            auto it = tabPageAssignments.find(c.id);
+            if (it != tabPageAssignments.end())
+                c.tabPageId = it->second;
+        }
+
+        for (auto& c : controls)
+        {
+            if (c.parentIndex >= 0 &&
+                c.parentIndex < static_cast<int>(controls.size()) &&
+                controls[c.parentIndex].type == ControlType::Tab)
+            {
+                const auto pageCount = std::max<size_t>(1, controls[c.parentIndex].tabPages.size());
+                if (c.tabPageId < 0)
+                    c.tabPageId = 0;
+                if (c.tabPageId >= static_cast<int>(pageCount))
+                    c.tabPageId = static_cast<int>(pageCount) - 1;
+            }
+            else
+            {
+                c.tabPageId = -1;
+            }
         }
 
         return controls;

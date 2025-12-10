@@ -40,6 +40,9 @@ export namespace win32_ui_editor::model
         ControlType  type{};        // logical type
         RECT         rect{};        // coordinates on the design surface (editor coords)
 
+        // Tab metadata: for controls inside a tab, which page are they on?
+        int          tabPageId{ -1 }; // 0-based index into parent tab's pages
+
         wstring      text{};        // caption or text
         int          id{ 1000 };    // numeric ID
 
@@ -47,6 +50,9 @@ export namespace win32_ui_editor::model
         wstring      idName{};      // e.g. L"ID_OK"
         wstring      styleExpr{};   // L"WS_CHILD | WS_VISIBLE | WS_TABSTOP"
         wstring      className{};   // e.g. L"BUTTON", L"EDIT", WC_LISTVIEWW, etc.
+
+        // Tab container pages (only used when type == ControlType::Tab)
+        vector<wstring> tabPages{}; // labels for each tab page
 
         // Container hierarchy (editor semantics based on import)
         int          parentIndex{ -1 }; // index into vector<ControlDef>, -1 = top-level
