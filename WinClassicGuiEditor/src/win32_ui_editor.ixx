@@ -117,6 +117,7 @@ namespace
     ParentInfo GetParentInfoFor(const wui::ControlDef& c);
     HWND EnsureControlCreated(int index);
     void EnsureTabPageContainers(int tabIndex);
+    RECT TabPageRectInDesignCoords(const wui::ControlDef& tabDef, HWND hTab);
     void ShowArrangeContextMenu(POINT screenPt);
 }
 
@@ -1030,10 +1031,8 @@ namespace
 
             if (parentDef.type == wui::ControlType::Tab)
             {
-                RECT pageRc{ 0, 0, parentDef.rect.right - parentDef.rect.left, parentDef.rect.bottom - parentDef.rect.top };
-                TabCtrl_AdjustRect(info.hwnd, FALSE, &pageRc);
-                info.rect.left += pageRc.left;
-                info.rect.top += pageRc.top;
+                RECT pageRc = TabPageRectInDesignCoords(parentDef, info.hwnd);
+                info.rect = pageRc;
 
                 const int pageIndex = c.tabPageId < 0 ? 0 : c.tabPageId;
                 info.hwnd = GetTabPageContainer(c.parentIndex, pageIndex);
@@ -1165,6 +1164,19 @@ namespace
         return hCtrl ? hCtrl : parent;
     }
 
+    RECT TabPageRectInDesignCoords(const wui::ControlDef& tabDef, HWND hTab)
+    {
+        RECT rc{ 0, 0, tabDef.rect.right - tabDef.rect.left, tabDef.rect.bottom - tabDef.rect.top };
+        TabCtrl_AdjustRect(hTab, FALSE, &rc);
+
+        RECT pageRect{};
+        pageRect.left = tabDef.rect.left + rc.left;
+        pageRect.top = tabDef.rect.top + rc.top;
+        pageRect.right = pageRect.left + std::max<LONG>(rc.right - rc.left, 4);
+        pageRect.bottom = pageRect.top + std::max<LONG>(rc.bottom - rc.top, 4);
+        return pageRect;
+    }
+
     void EnsureTabPageContainers(int tabIndex)
     {
         if (tabIndex < 0 || tabIndex >= static_cast<int>(CurrentControls().size()))
@@ -1184,12 +1196,9 @@ namespace
         const size_t pageCount = std::max<size_t>(1, tabDef.tabPages.size());
         auto& containers = g_tabPageContainers[tabIndex];
 
-        RECT rc{ 0, 0, tabDef.rect.right - tabDef.rect.left, tabDef.rect.bottom - tabDef.rect.top };
-        TabCtrl_AdjustRect(hTab, FALSE, &rc);
-        const int pageW = std::max<int>(rc.right - rc.left, 4);
-        const int pageH = std::max<int>(rc.bottom - rc.top, 4);
-        const int pageX = tabDef.rect.left + rc.left;
-        const int pageY = tabDef.rect.top + rc.top;
+        RECT pageRectDesign = TabPageRectInDesignCoords(tabDef, hTab);
+        const int pageW = pageRectDesign.right - pageRectDesign.left;
+        const int pageH = pageRectDesign.bottom - pageRectDesign.top;
 
         if (containers.size() > pageCount)
         {
@@ -1213,12 +1222,20 @@ namespace
                 hPage = CreateWindowExW(
                     0, L"STATIC", nullptr,
                     WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                    pageX, pageY, pageW, pageH,
-                    g_hDesign, nullptr, g_hInst, nullptr);
+                    pageRectDesign.left - tabDef.rect.left,
+                    pageRectDesign.top - tabDef.rect.top,
+                    pageW, pageH,
+                    hTab, nullptr, g_hInst, nullptr);
                 containers[i] = hPage;
             }
 
-            MoveWindow(hPage, pageX, pageY, pageW, pageH, TRUE);
+            MoveWindow(
+                hPage,
+                pageRectDesign.left - tabDef.rect.left,
+                pageRectDesign.top - tabDef.rect.top,
+                pageW,
+                pageH,
+                TRUE);
         }
 
         UpdateTabPageVisibility(tabIndex);
