@@ -88,6 +88,7 @@ namespace
         DragHandle handle{ DragHandle::None };
         POINT      startPt{};      // in design surface coords
         RECT       startRect{};    // control rect in design coords
+        RECT       previewRect{};  // live preview rect during drag
     };
 
     DragState g_drag{};
@@ -288,7 +289,12 @@ namespace
     {
         RECT rc{};
         if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
-            rc = CurrentControls()[g_selectedIndex].rect;
+        {
+            if (g_drag.active)
+                rc = g_drag.previewRect;
+            else
+                rc = CurrentControls()[g_selectedIndex].rect;
+        }
         return rc;
     }
 
@@ -485,6 +491,7 @@ namespace
         g_drag.handle = h;
         g_drag.startPt = designPt;
         g_drag.startRect = rc;
+        g_drag.previewRect = rc;
 
         SetCapture(g_hDesign);
         return true;
@@ -544,8 +551,7 @@ namespace
         }
 
         rc = ClampToDesignSurface(rc);
-        ApplyRectToControl(g_selectedIndex, rc);
-        RefreshPropertyPanelDebounced();
+        g_drag.previewRect = rc;
         RedrawDesignOverlay();
     }
 
@@ -554,8 +560,11 @@ namespace
         if (!g_drag.active)
             return;
 
+        const RECT finalRect = g_drag.previewRect;
         g_drag = {};
         ReleaseCapture();
+        ApplyRectToControl(g_selectedIndex, finalRect);
+        RebuildRuntimeControls();
         RefreshPropertyPanelDebounced(true);
         RedrawDesignOverlay();
     }
@@ -574,7 +583,7 @@ namespace
             return;
 
         const auto& c = CurrentControls()[g_selectedIndex];
-        RECT rc = ModelRectToClient(c.rect);
+        RECT rc = ModelRectToClient(SelectedRect());
         RECT client{};
         GetClientRect(g_hDesign, &client);
         if (!IntersectRect(&rc, &rc, &client))
