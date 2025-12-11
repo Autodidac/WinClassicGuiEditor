@@ -19,13 +19,13 @@
       <Filter>Source Files</Filter>
     </ClCompile>
     <ClCompile Include="src\win32_ui_editor.importparser.ixx">
-      <Filter>Source Files</Filter>
+      <Filter>Header Files</Filter>
     </ClCompile>
     <ClCompile Include="src\win32_ui_editor.ixx">
-      <Filter>Source Files</Filter>
+      <Filter>Header Files</Filter>
     </ClCompile>
     <ClCompile Include="src\win32_ui_editor.model.ixx">
-      <Filter>Source Files</Filter>
+      <Filter>Header Files</Filter>
     </ClCompile>
   </ItemGroup>
 </Project>
