@@ -2152,6 +2152,9 @@ namespace
                     auto& c = CurrentControls()[g_selectedIndex];
                     c.styleExpr = get_window_text_w(g_hStyleEdit);
                     sync_style_checkboxes_from_expr(c.styleExpr);
+                    RebuildRuntimeControls();
+                    RedrawDesignOverlay();
+                    RefreshPropertyPanel();
                 }
                 return 0;
             }
@@ -2163,15 +2166,27 @@ namespace
                 {
                 case 210:
                     apply_style_checkbox_change(g_hStyleChkChild, L"WS_CHILD");
+                    RebuildRuntimeControls();
+                    RedrawDesignOverlay();
+                    RefreshPropertyPanel();
                     return 0;
                 case 211:
                     apply_style_checkbox_change(g_hStyleChkVisible, L"WS_VISIBLE");
+                    RebuildRuntimeControls();
+                    RedrawDesignOverlay();
+                    RefreshPropertyPanel();
                     return 0;
                 case 212:
                     apply_style_checkbox_change(g_hStyleChkTabstop, L"WS_TABSTOP");
+                    RebuildRuntimeControls();
+                    RedrawDesignOverlay();
+                    RefreshPropertyPanel();
                     return 0;
                 case 213:
                     apply_style_checkbox_change(g_hStyleChkBorder, L"WS_BORDER");
+                    RebuildRuntimeControls();
+                    RedrawDesignOverlay();
+                    RefreshPropertyPanel();
                     return 0;
                 default:
                     break;
