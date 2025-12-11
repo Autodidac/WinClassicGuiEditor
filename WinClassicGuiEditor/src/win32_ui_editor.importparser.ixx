@@ -417,11 +417,13 @@ namespace win32_ui_editor::importparser::detail
     void extract_tab_metadata(
         const string& input,
         std::unordered_map<int, vector<wstring>>& tabItems,
-        std::unordered_map<int, int>& tabPageAssignments)
+        std::unordered_map<int, int>& tabPageAssignments,
+        std::unordered_map<int, std::pair<int, int>>& hierarchy)
     {
         std::istringstream iss(input);
         std::regex reItems(R"(TAB_ITEMS\s+id\s*=\s*([0-9]+)\s*:(.*))");
         std::regex rePage(R"(TAB_PAGE\s+id\s*=\s*([0-9]+)\s+page\s*=\s*([0-9]+))");
+        std::regex reHierarchy(R"(HIERARCHY\s+child\s*=\s*([0-9]+)\s+parent\s*=\s*(-?[0-9]+)(?:\s+page\s*=\s*([0-9]+))?)");
 
         string line;
         while (std::getline(iss, line))
@@ -439,6 +441,13 @@ namespace win32_ui_editor::importparser::detail
                 const int id = std::stoi(m[1].str());
                 const int page = std::stoi(m[2].str());
                 tabPageAssignments[id] = page;
+            }
+            else if (std::regex_search(line, m, reHierarchy))
+            {
+                const int child = std::stoi(m[1].str());
+                const int parent = std::stoi(m[2].str());
+                const int page = (m.size() >= 4 && m[3].matched) ? std::stoi(m[3].str()) : -1;
+                hierarchy[child] = { parent, page };
             }
         }
     }
@@ -506,7 +515,8 @@ namespace win32_ui_editor::importparser::detail
         // Preserve comments for tab metadata extraction
         std::unordered_map<int, vector<wstring>> tabItems;
         std::unordered_map<int, int> tabPageAssignments;
-        extract_tab_metadata(originalInput, tabItems, tabPageAssignments);
+        std::unordered_map<int, std::pair<int, int>> hierarchyLinks;
+        extract_tab_metadata(originalInput, tabItems, tabPageAssignments, hierarchyLinks);
 
         // Pre-clean
         string input = strip_comments(originalInput);
@@ -773,6 +783,45 @@ namespace win32_ui_editor::importparser::detail
                 c.styleExpr = win32_ui_editor::model::default_style_expr(c.type);
         }
 
+        std::unordered_map<int, int> idToIndex;
+        for (int i = 0; i < static_cast<int>(controls.size()); ++i)
+            idToIndex[controls[i].id] = i;
+
+        for (auto& kv : hierarchyLinks)
+        {
+            int childId = kv.first;
+            auto itChild = idToIndex.find(childId);
+            if (itChild == idToIndex.end())
+                continue;
+
+            int childIdx = itChild->second;
+            int parentIdx = -1;
+            int parentId = kv.second.first;
+            int page = kv.second.second;
+
+            if (parentId >= 0)
+            {
+                auto itParent = idToIndex.find(parentId);
+                if (itParent == idToIndex.end())
+                    continue;
+                parentIdx = itParent->second;
+            }
+
+            if (parentIdx >= 0 && !is_container_type(controls[parentIdx].type))
+                parentIdx = -1;
+
+            controls[childIdx].parentIndex = parentIdx;
+            if (parentIdx >= 0 && parentIdx < static_cast<int>(controls.size()) &&
+                controls[parentIdx].type == ControlType::Tab)
+            {
+                controls[childIdx].tabPageId = page;
+            }
+            else
+            {
+                controls[childIdx].tabPageId = -1;
+            }
+        }
+
         // Apply tab metadata and defaults
         for (auto& c : controls)
         {
@@ -792,7 +841,7 @@ namespace win32_ui_editor::importparser::detail
         for (auto& c : controls)
         {
             auto it = tabPageAssignments.find(c.id);
-            if (it != tabPageAssignments.end())
+            if (it != tabPageAssignments.end() && c.tabPageId < 0)
                 c.tabPageId = it->second;
         }
 
