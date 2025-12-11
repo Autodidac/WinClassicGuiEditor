@@ -1128,6 +1128,8 @@ namespace
         TabCtrl_AdjustRect(hTab, FALSE, &rc);
         const int pageW = std::max<int>(rc.right - rc.left, 4);
         const int pageH = std::max<int>(rc.bottom - rc.top, 4);
+        const int pageX = tabDef.rect.left + rc.left;
+        const int pageY = tabDef.rect.top + rc.top;
 
         if (containers.size() > pageCount)
         {
@@ -1151,12 +1153,12 @@ namespace
                 hPage = CreateWindowExW(
                     0, L"STATIC", nullptr,
                     WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                    rc.left, rc.top, pageW, pageH,
-                    hTab, nullptr, g_hInst, nullptr);
+                    pageX, pageY, pageW, pageH,
+                    g_hDesign, nullptr, g_hInst, nullptr);
                 containers[i] = hPage;
             }
 
-            MoveWindow(hPage, rc.left, rc.top, pageW, pageH, TRUE);
+            MoveWindow(hPage, pageX, pageY, pageW, pageH, TRUE);
         }
 
         UpdateTabPageVisibility(tabIndex);
