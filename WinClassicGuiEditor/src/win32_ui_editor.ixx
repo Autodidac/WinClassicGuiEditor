@@ -27,6 +27,7 @@ using std::to_wstring;
 
 namespace
 {
+    struct ZOrderNodeData;
     HINSTANCE g_hInst{};
     HWND      g_hMain{};
     HWND      g_hDesign{};
@@ -35,7 +36,7 @@ namespace
     HWND      g_hTabPageCombo{};
     HWND      g_hHierarchyTree{};
     HWND      g_hReparentBtn{};
-    HWND      g_hZOrderList{};
+    HWND      g_hZOrderTree{};
     HWND      g_hZBringFront{};
     HWND      g_hZSendBack{};
     HWND      g_hZForward{};
@@ -45,7 +46,7 @@ namespace
 
     int       g_zListTop{ 0 };
     int       g_treeTop{ 0 };
-    bool      g_inZListUpdate{ false };
+    bool      g_inZTreeUpdate{ false };
     bool      g_inTreeUpdate{ false };
 
     constexpr int kDesignMargin = 8;
@@ -70,10 +71,13 @@ namespace
     vector<HWND> g_hwndControls;
     std::unordered_map<int, std::vector<HWND>> g_tabPageContainers;
     std::vector<HTREEITEM> g_treeItems;
+    std::vector<HTREEITEM> g_zTreeItems;
+    std::deque<ZOrderNodeData> g_zTreeNodes;
 
     // Subclassing map for live controls
     std::unordered_map<HWND, WNDPROC> g_originalProcs;
     WNDPROC g_originalDesignProc{};
+    WNDPROC g_originalZTreeProc{};
 
     enum class DragHandle
     {
@@ -132,7 +136,8 @@ namespace
     void RebuildRuntimeControls();
     void RebuildHierarchyTree();
     std::wstring HierarchyLabelForControl(const wui::ControlDef& c, int idx);
-    void RebuildZOrderListItems();
+    const std::vector<std::wstring>& TabPagesFor(const wui::ControlDef& tab);
+    void RebuildZOrderTree();
     void SyncZOrderSelection();
     void SyncHierarchySelection();
     void UpdateZOrderButtons();
@@ -144,6 +149,8 @@ namespace
     void EnsureTabPageContainers(int tabIndex);
     RECT TabPageRectInDesignCoords(const wui::ControlDef& tabDef, HWND hTab);
     void ShowArrangeContextMenu(POINT screenPt);
+    int NormalizedTabPage(int tabIndex, int requested);
+    LRESULT CALLBACK ZOrderTreeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 }
 
 // -----------------------------------------------------------------------------
@@ -302,7 +309,7 @@ namespace
         g_selectedIndex = idx;
         InvalidateRect(g_hDesign, nullptr, TRUE);
         RefreshPropertyPanel();
-        RebuildZOrderListItems();
+        RebuildZOrderTree();
         SyncZOrderSelection();
         SyncHierarchySelection();
         UpdateZOrderButtons();
@@ -724,20 +731,52 @@ namespace
 
 namespace
 {
+    struct ZOrderNodeData
+    {
+        int  controlIndex{ -1 };
+        int  tabPage{ -1 };
+        bool isPageNode{ false };
+    };
+
     bool IsContainerControl(const wui::ControlDef& c)
     {
         return c.isContainer || wui::is_container_type(c.type);
     }
 
-    std::vector<int> CollectSiblings(int parentIndex)
+    int NormalizedPageForChild(int parentIndex, int tabPageId)
     {
+        if (parentIndex < 0 || parentIndex >= static_cast<int>(CurrentControls().size()))
+            return -1;
+
+        if (CurrentControls()[parentIndex].type != wui::ControlType::Tab)
+            return -1;
+
+        return NormalizedTabPage(parentIndex, tabPageId);
+    }
+
+    std::vector<int> CollectZOrderSiblings(int idx)
+    {
+        if (idx < 0 || idx >= static_cast<int>(CurrentControls().size()))
+            return {};
+
+        const int parentIndex = CurrentControls()[idx].parentIndex;
+        const int page = NormalizedPageForChild(parentIndex, CurrentControls()[idx].tabPageId);
+
         std::vector<int> siblings;
         siblings.reserve(CurrentControls().size());
 
         for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
         {
-            if (CurrentControls()[i].parentIndex == parentIndex)
-                siblings.push_back(i);
+            if (CurrentControls()[i].parentIndex != parentIndex)
+                continue;
+
+            if (page >= 0)
+            {
+                if (NormalizedPageForChild(parentIndex, CurrentControls()[i].tabPageId) != page)
+                    continue;
+            }
+
+            siblings.push_back(i);
         }
 
         return siblings;
@@ -776,7 +815,7 @@ namespace
         if (hasSel)
             parentIdx = CurrentControls()[idx].parentIndex;
 
-        auto siblings = CollectSiblings(parentIdx);
+        auto siblings = CollectZOrderSiblings(idx);
         const int pos = hasSel ? IndexInSiblings(idx, siblings) : -1;
         const int last = static_cast<int>(siblings.size()) - 1;
 
@@ -788,19 +827,19 @@ namespace
 
     void SyncZOrderSelection()
     {
-        if (!g_hZOrderList)
+        if (!g_hZOrderTree)
             return;
 
-        g_inZListUpdate = true;
-        int parentIdx = -1;
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
-            parentIdx = CurrentControls()[g_selectedIndex].parentIndex;
+        g_inZTreeUpdate = true;
+        if (g_zTreeItems.size() < CurrentControls().size())
+            g_zTreeItems.resize(CurrentControls().size(), nullptr);
 
-        auto siblings = CollectSiblings(parentIdx);
-        const int pos = IndexInSiblings(g_selectedIndex, siblings);
+        HTREEITEM target = nullptr;
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_zTreeItems.size()))
+            target = g_zTreeItems[g_selectedIndex];
 
-        SendMessageW(g_hZOrderList, LB_SETCURSEL, (pos >= 0) ? pos : (WPARAM)-1, 0);
-        g_inZListUpdate = false;
+        TreeView_SelectItem(g_hZOrderTree, target);
+        g_inZTreeUpdate = false;
 
         UpdateZOrderButtons();
     }
@@ -813,33 +852,106 @@ namespace
         SyncHierarchySelection();
     }
 
-    void RebuildZOrderListItems()
+    void RebuildZOrderTree()
     {
-        if (!g_hZOrderList)
+        if (!g_hZOrderTree)
             return;
 
-        g_inZListUpdate = true;
-        SendMessageW(g_hZOrderList, LB_RESETCONTENT, 0, 0);
+        g_inZTreeUpdate = true;
+        TreeView_DeleteAllItems(g_hZOrderTree);
+        g_zTreeItems.assign(CurrentControls().size(), nullptr);
+        g_zTreeNodes.clear();
 
-        int parentIdx = -1;
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
-            parentIdx = CurrentControls()[g_selectedIndex].parentIndex;
+        const int count = static_cast<int>(CurrentControls().size());
+        std::vector<std::vector<int>> children(count);
+        std::unordered_map<int, std::map<int, std::vector<int>>> tabPageChildren;
+        std::vector<int> roots;
 
-        auto siblings = CollectSiblings(parentIdx);
-        for (int idx : siblings)
+        for (int i = 0; i < count; ++i)
         {
-            const auto& c = CurrentControls()[idx];
-            wstring label = ZOrderLabelForControl(c, idx);
-            int pos = static_cast<int>(SendMessageW(g_hZOrderList, LB_ADDSTRING, 0, (LPARAM)label.c_str()));
-            SendMessageW(g_hZOrderList, LB_SETITEMDATA, pos, idx);
+            const int parent = CurrentControls()[i].parentIndex;
+            if (parent >= 0 && parent < count)
+            {
+                if (CurrentControls()[parent].type == wui::ControlType::Tab)
+                {
+                    int page = NormalizedPageForChild(parent, CurrentControls()[i].tabPageId);
+                    if (page < 0) page = 0;
+                    tabPageChildren[parent][page].push_back(i);
+                }
+                else
+                {
+                    children[parent].push_back(i);
+                }
+            }
+            else
+            {
+                roots.push_back(i);
+            }
         }
 
-        const int pos = IndexInSiblings(g_selectedIndex, siblings);
-        SendMessageW(g_hZOrderList, LB_SETCURSEL, (pos >= 0) ? pos : (WPARAM)-1, 0);
+        auto addNodeData = [&](int controlIdx, int tabPage, bool isPage)
+            {
+                g_zTreeNodes.push_back(ZOrderNodeData{ controlIdx, tabPage, isPage });
+                return reinterpret_cast<LPARAM>(&g_zTreeNodes.back());
+            };
 
-        g_inZListUpdate = false;
+        auto insertControl = [&](auto&& self, int idx, HTREEITEM hParent) -> void
+            {
+                TVINSERTSTRUCTW tvis{};
+                tvis.hParent = hParent ? hParent : TVI_ROOT;
+                tvis.hInsertAfter = TVI_LAST;
+                wstring label = ZOrderLabelForControl(CurrentControls()[idx], idx);
+                tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+                tvis.item.pszText = label.data();
+                tvis.item.lParam = addNodeData(idx, -1, false);
+                HTREEITEM hItem = TreeView_InsertItemW(g_hZOrderTree, &tvis);
+                g_zTreeItems[idx] = hItem;
 
-        UpdateZOrderButtons();
+                if (CurrentControls()[idx].type == wui::ControlType::Tab)
+                {
+                    auto tabIt = tabPageChildren.find(idx);
+                    if (tabIt != tabPageChildren.end())
+                    {
+                        const auto& pages = TabPagesFor(CurrentControls()[idx]);
+                        const size_t pageCount = std::max<size_t>(1, pages.size());
+                        for (size_t pi = 0; pi < pageCount; ++pi)
+                        {
+                            auto childrenIt = tabIt->second.find(static_cast<int>(pi));
+                            if (childrenIt == tabIt->second.end())
+                                continue;
+
+                            const wstring pageName = (pi < pages.size()) ? pages[pi] : std::format(L"Page {}", pi + 1);
+                            wstring pageLabel = std::format(L"Page {}: {}", pi, pageName);
+                            TVINSERTSTRUCTW pageTvis{};
+                            pageTvis.hParent = hItem;
+                            pageTvis.hInsertAfter = TVI_LAST;
+                            pageTvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+                            pageTvis.item.pszText = pageLabel.data();
+                            pageTvis.item.lParam = addNodeData(idx, static_cast<int>(pi), true);
+                            HTREEITEM hPage = TreeView_InsertItemW(g_hZOrderTree, &pageTvis);
+
+                            for (int child : childrenIt->second)
+                                self(self, child, hPage);
+
+                            TreeView_Expand(g_hZOrderTree, hPage, TVE_EXPAND);
+                        }
+                    }
+                }
+                else
+                {
+                    for (int child : children[idx])
+                        self(self, child, hItem);
+                }
+
+                if (IsContainerControl(CurrentControls()[idx]) && hItem)
+                    TreeView_Expand(g_hZOrderTree, hItem, TVE_EXPAND);
+            };
+
+        for (int root : roots)
+            insertControl(insertControl, root, nullptr);
+
+        g_inZTreeUpdate = false;
+        SyncZOrderSelection();
     }
 }
 
@@ -929,7 +1041,7 @@ namespace
 
 namespace
 {
-    constexpr int IDC_ZORDER_LIST = 300;
+    constexpr int IDC_ZORDER_TREE = 300;
     constexpr int IDC_ZORDER_BRING_FRONT = 301;
     constexpr int IDC_ZORDER_SEND_BACK = 302;
     constexpr int IDC_ZORDER_FORWARD = 303;
@@ -1104,7 +1216,7 @@ namespace
         }
 
         if (idx == PropIndex::Text || idx == PropIndex::ID)
-            RebuildZOrderListItems();
+            RebuildZOrderTree();
 
         RedrawDesignOverlay();
     }
@@ -1855,7 +1967,7 @@ namespace
 
         g_selectedIndex = CurrentControls().empty() ? -1 : 0;
 
-        RebuildZOrderListItems();
+        RebuildZOrderTree();
         RebuildRuntimeControls();
         RebuildHierarchyTree();
         RefreshPropertyPanel();
@@ -2064,7 +2176,7 @@ namespace
 
         RebuildRuntimeControls();
         RebuildHierarchyTree();
-        RebuildZOrderListItems();
+        RebuildZOrderTree();
         RefreshPropertyPanel();
         RedrawDesignOverlay();
         RestackAndRefreshSelection();
@@ -2112,7 +2224,7 @@ namespace
         {
             RebuildRuntimeControls();
             RebuildHierarchyTree();
-            RebuildZOrderListItems();
+            RebuildZOrderTree();
             RefreshPropertyPanel();
             RedrawDesignOverlay();
         }
@@ -2216,9 +2328,8 @@ namespace
 
         const int count = static_cast<int>(CurrentControls().size());
         const int oldIndex = g_selectedIndex;
-        const int parentIdx = CurrentControls()[oldIndex].parentIndex;
 
-        std::vector<int> siblings = CollectSiblings(parentIdx);
+        std::vector<int> siblings = CollectZOrderSiblings(oldIndex);
         const int oldPos = IndexInSiblings(oldIndex, siblings);
         int newPos = oldPos;
 
@@ -2277,7 +2388,7 @@ namespace
         g_selectedIndex = oldToNew[oldIndex];
 
         RebuildRuntimeControls();
-        RebuildZOrderListItems();
+        RebuildZOrderTree();
         RebuildHierarchyTree();
         RefreshPropertyPanel();
         RestackAndRefreshSelection();
@@ -2292,11 +2403,7 @@ namespace
         const int idx = g_selectedIndex;
         const bool hasSel = (idx >= 0 && idx < static_cast<int>(CurrentControls().size()));
 
-        int parentIdx = -1;
-        if (hasSel)
-            parentIdx = CurrentControls()[idx].parentIndex;
-
-        auto siblings = CollectSiblings(parentIdx);
+        auto siblings = CollectZOrderSiblings(idx);
         const int pos = hasSel ? IndexInSiblings(idx, siblings) : -1;
         const bool canFront = hasSel && pos >= 0 && pos < static_cast<int>(siblings.size()) - 1;
         const bool canBack = hasSel && pos > 0;
@@ -2519,11 +2626,14 @@ namespace
             g_hPropPanel, nullptr, g_hInst, nullptr);
 
         g_zListTop = y + 20;
-        g_hZOrderList = CreateWindowExW(
-            WS_EX_CLIENTEDGE, L"LISTBOX", L"",
-            WS_CHILD | WS_VISIBLE | WS_TABSTOP | LBS_NOTIFY | WS_VSCROLL,
+        g_hZOrderTree = CreateWindowExW(
+            WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
             8, g_zListTop, kPropPanelWidth - 16, 200,
-            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_LIST, g_hInst, nullptr);
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_TREE, g_hInst, nullptr);
+
+        if (g_hZOrderTree)
+            g_originalZTreeProc = (WNDPROC)SetWindowLongPtrW(g_hZOrderTree, GWLP_WNDPROC, (LONG_PTR)ZOrderTreeProc);
 
         const int btnWidth = (kPropPanelWidth - 24) / 2;
         int btnY = g_zListTop + 208;
@@ -2553,12 +2663,12 @@ namespace
             16 + btnWidth, btnY, btnWidth, 24,
             g_hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_BACKWARD, g_hInst, nullptr);
 
-        RebuildZOrderListItems();
+        RebuildZOrderTree();
     }
 
     void LayoutZOrderPanel()
     {
-        if (!g_hPropPanel || !g_hZOrderList)
+        if (!g_hPropPanel || !g_hZOrderTree)
             return;
 
         RECT rc{};
@@ -2587,7 +2697,7 @@ namespace
         const int available = rc.bottom - listTop - (buttonHeight * 2 + buttonSpacing * 2 + margin);
         const int listHeight = std::max(minListHeight, available);
 
-        MoveWindow(g_hZOrderList, margin, listTop, listWidth, listHeight, TRUE);
+        MoveWindow(g_hZOrderTree, margin, listTop, listWidth, listHeight, TRUE);
 
         int btnY = listTop + listHeight + buttonSpacing;
         const int btnWidth = (kPropPanelWidth - margin * 3) / 2;
@@ -2647,6 +2757,41 @@ namespace
 
             LayoutZOrderPanel();
         }
+    }
+}
+
+// -----------------------------------------------------------------------------
+// Z-ORDER TREE SUBCLASS
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    LRESULT CALLBACK ZOrderTreeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+    {
+        if (msg == WM_MOUSEWHEEL)
+        {
+            const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+            if (delta != 0)
+            {
+                if (GET_KEYSTATE_WPARAM(wp) & MK_SHIFT)
+                {
+                    HTREEITEM sel = TreeView_GetSelection(hwnd);
+                    if (sel)
+                    {
+                        TreeView_Expand(hwnd, sel, (delta > 0) ? TVE_EXPAND : TVE_COLLAPSE);
+                    }
+                }
+                else
+                {
+                    ApplyZOrderCommand(delta > 0 ? ZOrderCommand::MoveForward : ZOrderCommand::MoveBackward);
+                }
+                return 0;
+            }
+        }
+
+        if (g_originalZTreeProc)
+            return CallWindowProcW(g_originalZTreeProc, hwnd, msg, wp, lp);
+        return DefWindowProcW(hwnd, msg, wp, lp);
     }
 }
 
@@ -2817,6 +2962,23 @@ namespace
             LayoutChildren(hwnd);
             return 0;
 
+        case WM_NOTIFY:
+        {
+            auto hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (hdr && hdr->hwndFrom == g_hZOrderTree && hdr->code == TVN_SELCHANGEDW)
+            {
+                auto* tv = reinterpret_cast<NMTREEVIEWW*>(lp);
+                auto* node = reinterpret_cast<ZOrderNodeData*>(tv->itemNew.lParam);
+                if (!g_inZTreeUpdate && node && node->controlIndex >= 0 && node->controlIndex < static_cast<int>(CurrentControls().size()))
+                {
+                    SetSelectedIndex(node->controlIndex);
+                    RestackAndRefreshSelection();
+                }
+                return 0;
+            }
+            break;
+        }
+
         case WM_COMMAND:
         {
             const int id = LOWORD(wp);
@@ -2910,21 +3072,6 @@ namespace
                 return 0;
             }
 
-            if (id == IDC_ZORDER_LIST && code == LBN_SELCHANGE && !g_inZListUpdate)
-            {
-                int sel = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETCURSEL, 0, 0));
-                if (sel >= 0)
-                {
-                    int idx = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETITEMDATA, sel, 0));
-                    if (idx >= 0 && idx < static_cast<int>(CurrentControls().size()))
-                    {
-                        SetSelectedIndex(idx);
-                        RestackAndRefreshSelection();
-                    }
-                }
-                return 0;
-            }
-
             if (code == BN_CLICKED)
             {
                 switch (id)
@@ -2953,7 +3100,7 @@ namespace
             case IDM_NEW:
                 CurrentControls().clear();
                 g_selectedIndex = -1;
-                RebuildZOrderListItems();
+                RebuildZOrderTree();
                 RebuildRuntimeControls();
                 RebuildHierarchyTree();
                 RefreshPropertyPanel();
