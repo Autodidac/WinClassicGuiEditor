@@ -88,6 +88,7 @@ namespace
         DragHandle handle{ DragHandle::None };
         POINT      startPt{};      // in design surface coords
         RECT       startRect{};    // control rect in design coords
+        RECT       previewRect{};  // live outline during drag
     };
 
     DragState g_drag{};
@@ -287,7 +288,11 @@ namespace
     RECT SelectedRect()
     {
         RECT rc{};
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+        if (g_drag.active)
+        {
+            rc = g_drag.previewRect;
+        }
+        else if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
             rc = CurrentControls()[g_selectedIndex].rect;
         return rc;
     }
@@ -485,6 +490,7 @@ namespace
         g_drag.handle = h;
         g_drag.startPt = designPt;
         g_drag.startRect = rc;
+        g_drag.previewRect = rc;
 
         SetCapture(g_hDesign);
         return true;
@@ -544,8 +550,7 @@ namespace
         }
 
         rc = ClampToDesignSurface(rc);
-        ApplyRectToControl(g_selectedIndex, rc);
-        RefreshPropertyPanelDebounced();
+        g_drag.previewRect = rc;
         RedrawDesignOverlay();
     }
 
@@ -554,8 +559,15 @@ namespace
         if (!g_drag.active)
             return;
 
+        RECT finalRect = g_drag.previewRect;
+
         g_drag = {};
         ReleaseCapture();
+        if (g_selectedIndex >= 0)
+        {
+            ApplyRectToControl(g_selectedIndex, finalRect);
+            RebuildRuntimeControls();
+        }
         RefreshPropertyPanelDebounced(true);
         RedrawDesignOverlay();
     }
@@ -2060,6 +2072,19 @@ namespace
             SetSelectedIndex(hit);
             RedrawDesignOverlay();
             return 0;
+        }
+
+        case WM_PARENTNOTIFY:
+        {
+            if (LOWORD(wp) == WM_LBUTTONDOWN)
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                int hit = HitTestTopmostControl(pt);
+                SetSelectedIndex(hit);
+                if (BeginDrag(pt))
+                    return 0;
+            }
+            break;
         }
 
         case WM_MOUSEMOVE:
