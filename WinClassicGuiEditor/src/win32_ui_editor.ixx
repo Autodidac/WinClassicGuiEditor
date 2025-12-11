@@ -29,7 +29,7 @@ using std::to_wstring;
 // GLOBAL STATE
 // -----------------------------------------------------------------------------
 
-namespace
+namespace editor
 {
     struct ZOrderNodeData
     {
@@ -276,8 +276,8 @@ namespace
 
     void sync_style_checkboxes_from_expr(const wstring& expr)
     {
-        if (!g_hStyleChkChild) return;
-        g_inStyleUpdate = true;
+        if (!editor::g_hStyleChkChild) return;
+        editor::g_inStyleUpdate = true;
 
         auto set_chk = [](HWND h, bool on)
             {
@@ -285,21 +285,21 @@ namespace
                     SendMessageW(h, BM_SETCHECK, on ? BST_CHECKED : BST_UNCHECKED, 0);
             };
 
-        set_chk(g_hStyleChkChild, style_contains_flag(expr, L"WS_CHILD"));
-        set_chk(g_hStyleChkVisible, style_contains_flag(expr, L"WS_VISIBLE"));
-        set_chk(g_hStyleChkTabstop, style_contains_flag(expr, L"WS_TABSTOP"));
-        set_chk(g_hStyleChkBorder, style_contains_flag(expr, L"WS_BORDER"));
+        set_chk(editor::g_hStyleChkChild, style_contains_flag(expr, L"WS_CHILD"));
+        set_chk(editor::g_hStyleChkVisible, style_contains_flag(expr, L"WS_VISIBLE"));
+        set_chk(editor::g_hStyleChkTabstop, style_contains_flag(expr, L"WS_TABSTOP"));
+        set_chk(editor::g_hStyleChkBorder, style_contains_flag(expr, L"WS_BORDER"));
 
-        g_inStyleUpdate = false;
+        editor::g_inStyleUpdate = false;
     }
 
     void apply_style_checkbox_change(HWND chk, const wchar_t* flag)
     {
-        if (g_selectedIndex < 0 ||
-            g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        if (editor::g_selectedIndex < 0 ||
+            editor::g_selectedIndex >= static_cast<int>(editor::CurrentControls().size()))
             return;
 
-        auto& c = CurrentControls()[g_selectedIndex];
+        auto& c = editor::CurrentControls()[editor::g_selectedIndex];
 
         const auto checked = (SendMessageW(chk, BM_GETCHECK, 0, 0) == BST_CHECKED);
         if (checked)
@@ -307,20 +307,20 @@ namespace
         else
             style_remove_flag(c.styleExpr, flag);
 
-        set_window_text_w(g_hStyleEdit, c.styleExpr);
+        set_window_text_w(editor::g_hStyleEdit, c.styleExpr);
         sync_style_checkboxes_from_expr(c.styleExpr);
     }
 
     void SetSelectedIndex(int idx)
     {
-        if (idx < -1 || idx >= static_cast<int>(CurrentControls().size()))
+        if (idx < -1 || idx >= static_cast<int>(editor::CurrentControls().size()))
             return;
 
-        if (g_drag.active)
+        if (editor::g_drag.active)
             EndDrag();
 
-        g_selectedIndex = idx;
-        InvalidateRect(g_hDesign, nullptr, TRUE);
+        editor::g_selectedIndex = idx;
+        InvalidateRect(editor::g_hDesign, nullptr, TRUE);
         RefreshPropertyPanel();
         RebuildZOrderTree();
         SyncZOrderSelection();
@@ -330,9 +330,9 @@ namespace
 
     int FindControlIndexFromHwnd(HWND hwnd)
     {
-        for (int i = 0; i < static_cast<int>(g_hwndControls.size()); ++i)
+        for (int i = 0; i < static_cast<int>(editor::g_hwndControls.size()); ++i)
         {
-            if (g_hwndControls[i] == hwnd)
+            if (editor::g_hwndControls[i] == hwnd)
                 return i;
         }
         return -1;
@@ -340,38 +340,38 @@ namespace
 
     POINT ScreenToDesign(POINT pt)
     {
-        MapWindowPoints(HWND_DESKTOP, g_hDesign, &pt, 1);
+        MapWindowPoints(HWND_DESKTOP, editor::g_hDesign, &pt, 1);
         return pt;
     }
 
     POINT ClientToDesign(HWND from, POINT pt)
     {
-        MapWindowPoints(from, g_hDesign, &pt, 1);
+        MapWindowPoints(from, editor::g_hDesign, &pt, 1);
         return pt;
     }
 
     RECT SelectedRect()
     {
         RECT rc{};
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+        if (editor::g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(editor::CurrentControls().size()))
         {
-            if (g_drag.active)
-                rc = g_drag.previewRect;
+            if (editor::g_drag.active)
+                rc = editor::g_drag.previewRect;
             else
-                rc = CurrentControls()[g_selectedIndex].rect;
+                rc = editor::CurrentControls()[editor::g_selectedIndex].rect;
         }
         return rc;
     }
 
     int SnapToGrid(int value)
     {
-        return ((value + (kGridSize / 2)) / kGridSize) * kGridSize;
+        return ((value + (editor::kGridSize / 2)) / editor::kGridSize) * editor::kGridSize;
     }
 
     RECT ClampToDesignSurface(const RECT& rc)
     {
         RECT bounds{};
-        GetClientRect(g_hDesign, &bounds);
+        GetClientRect(editor::g_hDesign, &bounds);
 
         RECT out = rc;
         const int minW = 4;
@@ -414,16 +414,16 @@ namespace
     void RefreshPropertyPanelDebounced(bool force = false)
     {
         const DWORD tick = GetTickCount();
-        if (force || tick - g_lastPropRefreshTick >= kPropPanelDebounceMs)
+        if (force || tick - editor::g_lastPropRefreshTick >= editor::kPropPanelDebounceMs)
         {
-            g_lastPropRefreshTick = tick;
+            editor::g_lastPropRefreshTick = tick;
             RefreshPropertyPanel();
         }
     }
 
     std::array<RECT, 8> BuildHandleRects(const RECT& rc)
     {
-        const int hs = kHandleSize;
+        const int hs = editor::kHandleSize;
         const int midX = rc.left + (rc.right - rc.left) / 2;
         const int midY = rc.top + (rc.bottom - rc.top) / 2;
 
@@ -439,38 +439,38 @@ namespace
         };
     }
 
-    DragHandle HitTestHandles(const POINT& pt, const RECT& rc)
+    editor::DragHandle HitTestHandles(const POINT& pt, const RECT& rc)
     {
         auto handles = BuildHandleRects(rc);
-        if (PtInRect(&handles[0], pt)) return DragHandle::TopLeft;
-        if (PtInRect(&handles[1], pt)) return DragHandle::Top;
-        if (PtInRect(&handles[2], pt)) return DragHandle::TopRight;
-        if (PtInRect(&handles[3], pt)) return DragHandle::Left;
-        if (PtInRect(&handles[4], pt)) return DragHandle::Right;
-        if (PtInRect(&handles[5], pt)) return DragHandle::BottomLeft;
-        if (PtInRect(&handles[6], pt)) return DragHandle::Bottom;
-        if (PtInRect(&handles[7], pt)) return DragHandle::BottomRight;
-        return DragHandle::None;
+        if (PtInRect(&handles[0], pt)) return editor::DragHandle::TopLeft;
+        if (PtInRect(&handles[1], pt)) return editor::DragHandle::Top;
+        if (PtInRect(&handles[2], pt)) return editor::DragHandle::TopRight;
+        if (PtInRect(&handles[3], pt)) return editor::DragHandle::Left;
+        if (PtInRect(&handles[4], pt)) return editor::DragHandle::Right;
+        if (PtInRect(&handles[5], pt)) return editor::DragHandle::BottomLeft;
+        if (PtInRect(&handles[6], pt)) return editor::DragHandle::Bottom;
+        if (PtInRect(&handles[7], pt)) return editor::DragHandle::BottomRight;
+        return editor::DragHandle::None;
     }
 
     bool IsOnActiveTabPage(int index)
     {
-        if (index < 0 || index >= static_cast<int>(CurrentControls().size()))
+        if (index < 0 || index >= static_cast<int>(editor::CurrentControls().size()))
             return false;
 
         int child = index;
-        int parent = CurrentControls()[child].parentIndex;
+        int parent = editor::CurrentControls()[child].parentIndex;
 
-        while (parent >= 0 && parent < static_cast<int>(CurrentControls().size()))
+        while (parent >= 0 && parent < static_cast<int>(editor::CurrentControls().size()))
         {
-            const auto& parentCtrl = CurrentControls()[parent];
+            const auto& parentCtrl = editor::CurrentControls()[parent];
             if (parentCtrl.type == wui::ControlType::Tab)
             {
-                const auto& childCtrl = CurrentControls()[child];
+                const auto& childCtrl = editor::CurrentControls()[child];
                 int pageId = childCtrl.tabPageId < 0 ? 0 : childCtrl.tabPageId;
 
-                HWND hTab = (parent < static_cast<int>(g_hwndControls.size()))
-                    ? g_hwndControls[parent]
+                HWND hTab = (parent < static_cast<int>(editor::g_hwndControls.size()))
+                    ? editor::g_hwndControls[parent]
                     : nullptr;
 
                 int sel = hTab ? TabCtrl_GetCurSel(hTab) : 0;
@@ -490,9 +490,9 @@ namespace
 
     int HitTestTopmostControl(const POINT& designPt)
     {
-        for (int i = static_cast<int>(CurrentControls().size()) - 1; i >= 0; --i)
+        for (int i = static_cast<int>(editor::CurrentControls().size()) - 1; i >= 0; --i)
         {
-            const auto& c = CurrentControls()[i];
+            const auto& c = editor::CurrentControls()[i];
             if (!PtInRect(&c.rect, designPt))
                 continue;
 
@@ -507,18 +507,18 @@ namespace
 
     void ApplyRectToControl(int index, const RECT& rc)
     {
-        if (index < 0 || index >= static_cast<int>(CurrentControls().size()))
+        if (index < 0 || index >= static_cast<int>(editor::CurrentControls().size()))
             return;
 
-        auto& c = CurrentControls()[index];
+        auto& c = editor::CurrentControls()[index];
         c.rect = rc;
 
-        if (index >= 0 && index < static_cast<int>(g_hwndControls.size()))
+        if (index >= 0 && index < static_cast<int>(editor::g_hwndControls.size()))
         {
-            HWND h = g_hwndControls[index];
+            HWND h = editor::g_hwndControls[index];
             if (h)
             {
-                ParentInfo pinfo = GetParentInfoFor(c);
+                editor::ParentInfo pinfo = GetParentInfoFor(c);
                 const int w = c.rect.right - c.rect.left;
                 const int hgt = c.rect.bottom - c.rect.top;
                 const int relX = c.rect.left - pinfo.rect.left;
@@ -533,81 +533,81 @@ namespace
 
     void RedrawDesignOverlay()
     {
-        if (!g_hDesign)
+        if (!editor::g_hDesign)
             return;
-        InvalidateRect(g_hDesign, nullptr, TRUE);
-        UpdateWindow(g_hDesign);
+        InvalidateRect(editor::g_hDesign, nullptr, TRUE);
+        UpdateWindow(editor::g_hDesign);
     }
 
     bool BeginDrag(const POINT& designPt)
     {
-        if (g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        if (g_selectedIndex < 0 || editor::g_selectedIndex >= static_cast<int>(editor::CurrentControls().size()))
             return false;
 
         RECT rc = SelectedRect();
-        DragHandle h = HitTestHandles(designPt, rc);
-        if (h == DragHandle::None && PtInRect(&rc, designPt))
-            h = DragHandle::Move;
+        editor::DragHandle h = HitTestHandles(designPt, rc);
+        if (h == editor::DragHandle::None && PtInRect(&rc, designPt))
+            h = editor::DragHandle::Move;
 
-        if (h == DragHandle::None)
+        if (h == editor::DragHandle::None)
             return false;
 
-        g_drag.active = true;
-        g_drag.handle = h;
-        g_drag.startPt = designPt;
-        g_drag.startRect = rc;
-        g_drag.previewRect = rc;
+        editor::g_drag.active = true;
+        editor::g_drag.handle = h;
+        editor::g_drag.startPt = designPt;
+        editor::g_drag.startRect = rc;
+        editor::g_drag.previewRect = rc;
 
-        SetCapture(g_hDesign);
+        SetCapture(editor::g_hDesign);
         return true;
     }
 
     void UpdateDrag(const POINT& designPt)
     {
-        if (!g_drag.active || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        if (!editor::g_drag.active || editor::g_selectedIndex < 0 || editor::g_selectedIndex >= static_cast<int>(editor::CurrentControls().size()))
             return;
 
-        RECT rc = g_drag.startRect;
-        const int dx = designPt.x - g_drag.startPt.x;
-        const int dy = designPt.y - g_drag.startPt.y;
+        RECT rc = editor::g_drag.startRect;
+        const int dx = designPt.x - editor::g_drag.startPt.x;
+        const int dy = designPt.y - editor::g_drag.startPt.y;
 
         const int origW = rc.right - rc.left;
         const int origH = rc.bottom - rc.top;
 
-        switch (g_drag.handle)
+        switch (editor::g_drag.handle)
         {
-        case DragHandle::Move:
+        case editor::DragHandle::Move:
             OffsetRect(&rc, dx, dy);
             rc.left = SnapToGrid(rc.left);
             rc.top = SnapToGrid(rc.top);
             rc.right = rc.left + origW;
             rc.bottom = rc.top + origH;
             break;
-        case DragHandle::Left:
+        case editor::DragHandle::Left:
             rc.left += dx;
             break;
-        case DragHandle::Right:
+        case editor::DragHandle::Right:
             rc.right += dx;
             break;
-        case DragHandle::Top:
+        case editor::DragHandle::Top:
             rc.top += dy;
             break;
-        case DragHandle::Bottom:
+        case editor::DragHandle::Bottom:
             rc.bottom += dy;
             break;
-        case DragHandle::TopLeft:
+        case editor::DragHandle::TopLeft:
             rc.left += dx; rc.top += dy; break;
-        case DragHandle::TopRight:
+        case editor::DragHandle::TopRight:
             rc.right += dx; rc.top += dy; break;
-        case DragHandle::BottomLeft:
+        case editor::DragHandle::BottomLeft:
             rc.left += dx; rc.bottom += dy; break;
-        case DragHandle::BottomRight:
+        case editor::DragHandle::BottomRight:
             rc.right += dx; rc.bottom += dy; break;
         default:
             break;
         }
 
-        if (g_drag.handle != DragHandle::Move)
+        if (editor::g_drag.handle != editor::DragHandle::Move)
         {
             rc.left = SnapToGrid(rc.left);
             rc.top = SnapToGrid(rc.top);
@@ -616,19 +616,19 @@ namespace
         }
 
         rc = ClampToDesignSurface(rc);
-        g_drag.previewRect = rc;
+        editor::g_drag.previewRect = rc;
         RedrawDesignOverlay();
     }
 
     void EndDrag()
     {
-        if (!g_drag.active)
+        if (!editor::g_drag.active)
             return;
 
-        const RECT finalRect = g_drag.previewRect;
-        g_drag = {};
+        const RECT finalRect = editor::g_drag.previewRect;
+        editor::g_drag = {};
         ReleaseCapture();
-        ApplyRectToControl(g_selectedIndex, finalRect);
+        ApplyRectToControl(editor::g_selectedIndex, finalRect);
         RebuildRuntimeControls();
         RefreshPropertyPanelDebounced(true);
         RedrawDesignOverlay();
@@ -644,13 +644,13 @@ namespace
 
     void DrawSelectionOverlay(HDC hdc)
     {
-        if (!g_hDesign || !hdc || g_selectedIndex < 0 || g_selectedIndex >= static_cast<int>(CurrentControls().size()))
+        if (!editor::g_hDesign || !hdc || editor::g_selectedIndex < 0 || editor::g_selectedIndex >= static_cast<int>(editor::CurrentControls().size()))
             return;
 
-        const auto& c = CurrentControls()[g_selectedIndex];
+        const auto& c = editor::CurrentControls()[editor::g_selectedIndex];
         RECT rc = ModelRectToClient(SelectedRect());
         RECT client{};
-        GetClientRect(g_hDesign, &client);
+        GetClientRect(editor::g_hDesign, &client);
         if (!IntersectRect(&rc, &rc, &client))
             return;
 
@@ -713,12 +713,12 @@ namespace
 
     void DrawCreationOverlay(HDC hdc)
     {
-        if (!g_hDesign || !hdc || !g_create.drawing)
+        if (!editor::g_hDesign || !hdc || !editor::g_create.drawing)
             return;
 
-        RECT rc = ModelRectToClient(g_create.previewRect);
+        RECT rc = ModelRectToClient(editor::g_create.previewRect);
         RECT client{};
-        GetClientRect(g_hDesign, &client);
+        GetClientRect(editor::g_hDesign, &client);
         if (!IntersectRect(&rc, &rc, &client))
             return;
 
@@ -751,10 +751,10 @@ namespace
 
     int NormalizedPageForChild(int parentIndex, int tabPageId)
     {
-        if (parentIndex < 0 || parentIndex >= static_cast<int>(CurrentControls().size()))
+        if (parentIndex < 0 || parentIndex >= static_cast<int>(editor::CurrentControls().size()))
             return -1;
 
-        if (CurrentControls()[parentIndex].type != wui::ControlType::Tab)
+        if (editor::CurrentControls()[parentIndex].type != wui::ControlType::Tab)
             return -1;
 
         return NormalizedTabPage(parentIndex, tabPageId);
@@ -762,23 +762,23 @@ namespace
 
     std::vector<int> CollectZOrderSiblings(int idx)
     {
-        if (idx < 0 || idx >= static_cast<int>(CurrentControls().size()))
+        if (idx < 0 || idx >= static_cast<int>(editor::CurrentControls().size()))
             return {};
 
-        const int parentIndex = CurrentControls()[idx].parentIndex;
-        const int page = NormalizedPageForChild(parentIndex, CurrentControls()[idx].tabPageId);
+        const int parentIndex = editor::CurrentControls()[idx].parentIndex;
+        const int page = NormalizedPageForChild(parentIndex, editor::CurrentControls()[idx].tabPageId);
 
         std::vector<int> siblings;
-        siblings.reserve(CurrentControls().size());
+        siblings.reserve(editor::CurrentControls().size());
 
-        for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
+        for (int i = 0; i < static_cast<int>(editor::CurrentControls().size()); ++i)
         {
-            if (CurrentControls()[i].parentIndex != parentIndex)
+            if (editor::CurrentControls()[i].parentIndex != parentIndex)
                 continue;
 
             if (page >= 0)
             {
-                if (NormalizedPageForChild(parentIndex, CurrentControls()[i].tabPageId) != page)
+                if (NormalizedPageForChild(parentIndex, editor::CurrentControls()[i].tabPageId) != page)
                     continue;
             }
 
@@ -814,8 +814,8 @@ namespace
                 if (h) EnableWindow(h, on);
             };
 
-        const int idx = g_selectedIndex;
-        const bool hasSel = (idx >= 0 && idx < static_cast<int>(CurrentControls().size()));
+        const int idx = editor::g_selectedIndex;
+        const bool hasSel = (idx >= 0 && idx < static_cast<int>(editor::CurrentControls().size()));
 
         int parentIdx = -1;
         if (hasSel)
@@ -825,27 +825,27 @@ namespace
         const int pos = hasSel ? IndexInSiblings(idx, siblings) : -1;
         const int last = static_cast<int>(siblings.size()) - 1;
 
-        set_enabled(g_hZBringFront, hasSel && pos >= 0 && pos < last);
-        set_enabled(g_hZForward, hasSel && pos >= 0 && pos < last);
-        set_enabled(g_hZSendBack, hasSel && pos > 0);
-        set_enabled(g_hZBackward, hasSel && pos > 0);
+        set_enabled(editor::g_hZBringFront, hasSel && pos >= 0 && pos < last);
+        set_enabled(editor::g_hZForward, hasSel && pos >= 0 && pos < last);
+        set_enabled(editor::g_hZSendBack, hasSel && pos > 0);
+        set_enabled(editor::g_hZBackward, hasSel && pos > 0);
     }
 
     void SyncZOrderSelection()
     {
-        if (!g_hZOrderTree)
+        if (!editor::g_hZOrderTree)
             return;
 
-        g_inZTreeUpdate = true;
-        if (g_zTreeItems.size() < CurrentControls().size())
-            g_zTreeItems.resize(CurrentControls().size(), nullptr);
+        editor::g_inZTreeUpdate = true;
+        if (editor::g_zTreeItems.size() < editor::CurrentControls().size())
+            editor::g_zTreeItems.resize(editor::CurrentControls().size(), nullptr);
 
         HTREEITEM target = nullptr;
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_zTreeItems.size()))
-            target = g_zTreeItems[g_selectedIndex];
+        if (editor::g_selectedIndex >= 0 && editor::g_selectedIndex < static_cast<int>(editor::g_zTreeItems.size()))
+            target = editor::g_zTreeItems[editor::g_selectedIndex];
 
-        TreeView_SelectItem(g_hZOrderTree, target);
-        g_inZTreeUpdate = false;
+        TreeView_SelectItem(editor::g_hZOrderTree, target);
+        editor::g_inZTreeUpdate = false;
 
         UpdateZOrderButtons();
     }
@@ -860,27 +860,27 @@ namespace
 
     void RebuildZOrderTree()
     {
-        if (!g_hZOrderTree)
+        if (!editor::g_hZOrderTree)
             return;
 
-        g_inZTreeUpdate = true;
-        TreeView_DeleteAllItems(g_hZOrderTree);
-        g_zTreeItems.assign(CurrentControls().size(), nullptr);
-        g_zTreeNodes.clear();
+        editor::g_inZTreeUpdate = true;
+        TreeView_DeleteAllItems(editor::g_hZOrderTree);
+        editor::g_zTreeItems.assign(editor::CurrentControls().size(), nullptr);
+        editor::g_zTreeNodes.clear();
 
-        const int count = static_cast<int>(CurrentControls().size());
+        const int count = static_cast<int>(editor::CurrentControls().size());
         std::vector<std::vector<int>> children(count);
         std::unordered_map<int, std::map<int, std::vector<int>>> tabPageChildren;
         std::vector<int> roots;
 
         for (int i = 0; i < count; ++i)
         {
-            const int parent = CurrentControls()[i].parentIndex;
+            const int parent = editor::CurrentControls()[i].parentIndex;
             if (parent >= 0 && parent < count)
             {
-                if (CurrentControls()[parent].type == wui::ControlType::Tab)
+                if (editor::CurrentControls()[parent].type == wui::ControlType::Tab)
                 {
-                    int page = NormalizedPageForChild(parent, CurrentControls()[i].tabPageId);
+                    int page = NormalizedPageForChild(parent, editor::CurrentControls()[i].tabPageId);
                     if (page < 0) page = 0;
                     tabPageChildren[parent][page].push_back(i);
                 }
@@ -897,8 +897,8 @@ namespace
 
         auto addNodeData = [&](int controlIdx, int tabPage, bool isPage)
             {
-                g_zTreeNodes.push_back(ZOrderNodeData{ controlIdx, tabPage, isPage });
-                return reinterpret_cast<LPARAM>(&g_zTreeNodes.back());
+                editor::g_zTreeNodes.push_back(editor::ZOrderNodeData{ controlIdx, tabPage, isPage });
+                return reinterpret_cast<LPARAM>(&editor::g_zTreeNodes.back());
             };
 
         auto insertControl = [&](auto&& self, int idx, HTREEITEM hParent) -> void
@@ -906,19 +906,19 @@ namespace
                 TVINSERTSTRUCTW tvis{};
                 tvis.hParent = hParent ? hParent : TVI_ROOT;
                 tvis.hInsertAfter = TVI_LAST;
-                wstring label = ZOrderLabelForControl(CurrentControls()[idx], idx);
+                wstring label = ZOrderLabelForControl(editor::CurrentControls()[idx], idx);
                 tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                 tvis.item.pszText = label.data();
                 tvis.item.lParam = addNodeData(idx, -1, false);
-                HTREEITEM hItem = TreeView_InsertItemW(g_hZOrderTree, &tvis);
-                g_zTreeItems[idx] = hItem;
+                HTREEITEM hItem = TreeView_InsertItemW(editor::g_hZOrderTree, &tvis);
+                editor::g_zTreeItems[idx] = hItem;
 
-                if (CurrentControls()[idx].type == wui::ControlType::Tab)
+                if (editor::CurrentControls()[idx].type == wui::ControlType::Tab)
                 {
                     auto tabIt = tabPageChildren.find(idx);
                     if (tabIt != tabPageChildren.end())
                     {
-                        const auto& pages = TabPagesFor(CurrentControls()[idx]);
+                        const auto& pages = TabPagesFor(editor::CurrentControls()[idx]);
                         const size_t pageCount = std::max<size_t>(1, pages.size());
                         for (size_t pi = 0; pi < pageCount; ++pi)
                         {
@@ -934,7 +934,7 @@ namespace
                             pageTvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                             pageTvis.item.pszText = pageLabel.data();
                             pageTvis.item.lParam = addNodeData(idx, static_cast<int>(pi), true);
-                            HTREEITEM hPage = TreeView_InsertItemW(g_hZOrderTree, &pageTvis);
+                            HTREEITEM hPage = TreeView_InsertItemW(editor::g_hZOrderTree, &pageTvis);
 
                             for (int child : childrenIt->second)
                                 self(self, child, hPage);
@@ -949,14 +949,14 @@ namespace
                         self(self, child, hItem);
                 }
 
-                if (IsContainerControl(CurrentControls()[idx]) && hItem)
-                    TreeView_Expand(g_hZOrderTree, hItem, TVE_EXPAND);
+                if (IsContainerControl(editor::CurrentControls()[idx]) && hItem)
+                    TreeView_Expand(editor::g_hZOrderTree, hItem, TVE_EXPAND);
             };
 
         for (int root : roots)
             insertControl(insertControl, root, nullptr);
 
-        g_inZTreeUpdate = false;
+        editor::g_inZTreeUpdate = false;
         SyncZOrderSelection();
     }
 }
@@ -977,37 +977,37 @@ namespace
 
     void SyncHierarchySelection()
     {
-        if (!g_hHierarchyTree)
+        if (!editor::g_hHierarchyTree)
             return;
 
-        if (g_treeItems.size() < CurrentControls().size())
-            g_treeItems.resize(CurrentControls().size(), nullptr);
+        if (editor::g_treeItems.size() < editor::CurrentControls().size())
+            editor::g_treeItems.resize(editor::CurrentControls().size(), nullptr);
 
-        g_inTreeUpdate = true;
+        editor::g_inTreeUpdate = true;
         HTREEITEM target = nullptr;
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_treeItems.size()))
-            target = g_treeItems[g_selectedIndex];
+        if (editor::g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(editor::g_treeItems.size()))
+            target = editor::g_treeItems[editor::g_selectedIndex];
 
-        TreeView_SelectItem(g_hHierarchyTree, target);
-        g_inTreeUpdate = false;
+        TreeView_SelectItem(editor::g_hHierarchyTree, target);
+        editor::g_inTreeUpdate = false;
     }
 
     void RebuildHierarchyTree()
     {
-        if (!g_hHierarchyTree)
+        if (!editor::g_hHierarchyTree)
             return;
 
-        g_inTreeUpdate = true;
-        TreeView_DeleteAllItems(g_hHierarchyTree);
-        g_treeItems.assign(CurrentControls().size(), nullptr);
+        editor::g_inTreeUpdate = true;
+        TreeView_DeleteAllItems(editor::g_hHierarchyTree);
+        editor::g_treeItems.assign(editor::CurrentControls().size(), nullptr);
 
-        const int count = static_cast<int>(CurrentControls().size());
+        const int count = static_cast<int>(editor::CurrentControls().size());
         std::vector<std::vector<int>> children(count);
         std::vector<int> roots;
 
         for (int i = 0; i < count; ++i)
         {
-            int parent = CurrentControls()[i].parentIndex;
+            int parent = editor::CurrentControls()[i].parentIndex;
             if (parent >= 0 && parent < count)
                 children[parent].push_back(i);
             else
@@ -1019,15 +1019,15 @@ namespace
                 TVINSERTSTRUCTW tvis{};
                 tvis.hParent = hParent ? hParent : TVI_ROOT;
                 tvis.hInsertAfter = TVI_LAST;
-                wstring label = HierarchyLabelForControl(CurrentControls()[idx], idx);
+                wstring label = HierarchyLabelForControl(editor::CurrentControls()[idx], idx);
                 tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                 tvis.item.pszText = label.data();
                 tvis.item.lParam = idx;
-                HTREEITEM hItem = TreeView_InsertItemW(g_hHierarchyTree, &tvis);
-                g_treeItems[idx] = hItem;
+                HTREEITEM hItem = TreeView_InsertItemW(editor::g_hHierarchyTree, &tvis);
+                editor::g_treeItems[idx] = hItem;
 
-                if (IsContainerControl(CurrentControls()[idx]) && hItem)
-                    TreeView_Expand(g_hHierarchyTree, hItem, TVE_EXPAND);
+                if (IsContainerControl(editor::CurrentControls()[idx]) && hItem)
+                    TreeView_Expand(editor::g_hHierarchyTree, hItem, TVE_EXPAND);
 
                 for (int child : children[idx])
                     self(self, child, hItem);
@@ -1036,7 +1036,7 @@ namespace
         for (int root : roots)
             insertNode(insertNode, root, nullptr);
 
-        g_inTreeUpdate = false;
+        editor::g_inTreeUpdate = false;
         SyncHierarchySelection();
     }
 }
