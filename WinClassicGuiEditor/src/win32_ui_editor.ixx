@@ -1422,6 +1422,8 @@ namespace
                 : wui::default_style_expr(c.type);
 
             const std::wstring className = wui::DefaultClassName(c.type);
+            const std::wstring escapedClass = escape_wstring_literal(className);
+            const std::wstring escapedText = escape_wstring_literal(c.text);
 
             wstring varName = std::format(L"hwnd_{}_{}",
                 wui::ControlTypeLabel(c.type),
@@ -1429,8 +1431,8 @@ namespace
 
             result += L"HWND " + varName + L" = CreateWindowExW(\n";
             result += L"    0,\n";
-            result += L"    L\"" + className + L"\",\n";
-            result += L"    L\"" + c.text + L"\",\n";
+            result += L"    L\"" + escapedClass + L"\",\n";
+            result += L"    L\"" + escapedText + L"\",\n";
             result += L"    " + styleToken + L",\n";
             result += std::format(L"    {}, {}, {}, {},\n", x, y, w, h);
             result += L"    hwndParent,\n";
@@ -2078,6 +2080,20 @@ namespace
 
             ShowArrangeContextMenu(pt);
             return 0;
+        }
+
+        case WM_MOUSEWHEEL:
+        {
+            if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL)
+            {
+                const int delta = GET_WHEEL_DELTA_WPARAM(wp);
+                if (delta > 0)
+                    ApplyZOrderCommand(ZOrderCommand::MoveForward);
+                else if (delta < 0)
+                    ApplyZOrderCommand(ZOrderCommand::MoveBackward);
+                return 0;
+            }
+            break;
         }
 
         case WM_PAINT:

@@ -637,15 +637,44 @@ namespace win32_ui_editor::importparser::detail
                 auto stripStringPrefix = [](const string& literal) -> string {
                     if (literal.starts_with("u8\"") || literal.starts_with("u8'"))
                         return literal.substr(2);
-                    if (literal.size() >= 2 &&
-                        (literal.front() == 'L' || literal.front() == 'u' || literal.front() == 'U') &&
-                        (literal[1] == '"' || literal[1] == '\''))
+
+                    if (literal.empty())
+                        return literal;
+
+                    const bool hasWidePrefix =
+                        (literal.front() == 'L' || literal.front() == 'u' || literal.front() == 'U');
+                    if (!hasWidePrefix)
+                        return literal;
+
+                    size_t pos = 1;
+                    while (pos < literal.size() && std::isspace(static_cast<unsigned char>(literal[pos])))
+                        ++pos;
+
+                    if (pos >= literal.size())
                         return literal.substr(1);
-                    return literal;
+
+                    // Only trim the prefix when it is actually attached to a string literal token.
+                    if (literal[pos] == '"' || literal[pos] == '\'')
+                        return literal.substr(pos);
+
+                    return literal.substr(1);
+                    };
+
+                auto trim_whitespace = [](string s)
+                    {
+                        size_t start = 0;
+                        while (start < s.size() && std::isspace(static_cast<unsigned char>(s[start])))
+                            ++start;
+
+                        size_t end = s.size();
+                        while (end > start && std::isspace(static_cast<unsigned char>(s[end - 1])))
+                            --end;
+
+                        return s.substr(start, end - start);
                     };
 
                 auto parseClass = [&](const string& cls) -> wstring {
-                    string normalized = stripStringPrefix(cls);
+                    string normalized = trim_whitespace(stripStringPrefix(cls));
                     if (normalized.starts_with("WC_"))
                         return wstring(normalized.begin(), normalized.end()); // macro name
                     if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"')
@@ -657,7 +686,7 @@ namespace win32_ui_editor::importparser::detail
 
                 // Extract text
                 auto parseText = [&](const string& s) -> wstring {
-                    string normalized = stripStringPrefix(s);
+                    string normalized = trim_whitespace(stripStringPrefix(s));
                     if (normalized.size() >= 2 && normalized.front() == '"' && normalized.back() == '"')
                         return wstring(normalized.begin() + 1, normalized.end() - 1);
                     return wstring(normalized.begin(), normalized.end());
