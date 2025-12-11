@@ -380,6 +380,58 @@ namespace
         return DragHandle::None;
     }
 
+    bool IsOnActiveTabPage(int index)
+    {
+        if (index < 0 || index >= static_cast<int>(CurrentControls().size()))
+            return false;
+
+        int child = index;
+        int parent = CurrentControls()[child].parentIndex;
+
+        while (parent >= 0 && parent < static_cast<int>(CurrentControls().size()))
+        {
+            const auto& parentCtrl = CurrentControls()[parent];
+            if (parentCtrl.type == wui::ControlType::Tab)
+            {
+                const auto& childCtrl = CurrentControls()[child];
+                int pageId = childCtrl.tabPageId < 0 ? 0 : childCtrl.tabPageId;
+
+                HWND hTab = (parent < static_cast<int>(g_hwndControls.size()))
+                    ? g_hwndControls[parent]
+                    : nullptr;
+
+                int sel = hTab ? TabCtrl_GetCurSel(hTab) : 0;
+                if (sel < 0)
+                    sel = 0;
+
+                if (pageId != sel)
+                    return false;
+            }
+
+            child = parent;
+            parent = parentCtrl.parentIndex;
+        }
+
+        return true;
+    }
+
+    int HitTestTopmostControl(const POINT& designPt)
+    {
+        for (int i = static_cast<int>(CurrentControls().size()) - 1; i >= 0; --i)
+        {
+            const auto& c = CurrentControls()[i];
+            if (!PtInRect(&c.rect, designPt))
+                continue;
+
+            if (!IsOnActiveTabPage(i))
+                continue;
+
+            return i;
+        }
+
+        return -1;
+    }
+
     void ApplyRectToControl(int index, const RECT& rc)
     {
         if (index < 0 || index >= static_cast<int>(CurrentControls().size()))
@@ -1979,8 +2031,8 @@ namespace
             if (BeginDrag(designPt))
                 return 0;
 
-            // Deselect if clicking empty space
-            SetSelectedIndex(-1);
+            int hit = HitTestTopmostControl(designPt);
+            SetSelectedIndex(hit);
             RedrawDesignOverlay();
             return 0;
         }
