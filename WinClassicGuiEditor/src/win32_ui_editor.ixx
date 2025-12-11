@@ -40,6 +40,8 @@ namespace
     HWND      g_hZSendBack{};
     HWND      g_hZForward{};
     HWND      g_hZBackward{};
+    HWND      g_hToolbar{};
+    HMENU     g_hInsertMenu{};
 
     int       g_zListTop{ 0 };
     int       g_treeTop{ 0 };
@@ -98,6 +100,19 @@ namespace
 
     DragState g_drag{};
 
+    struct CreationState
+    {
+        bool pending{ false };
+        bool drawing{ false };
+        wui::ControlType type{};
+        ParentPickResult parentChoice{};
+        POINT startPt{};
+        RECT  previewRect{};
+    };
+
+    CreationState g_create{};
+    bool g_drawToCreateMode{ true };
+
     constexpr int kHandleSize = 6;
     constexpr int kGridSize = 4;
     constexpr DWORD kPropPanelDebounceMs = 60;
@@ -111,6 +126,7 @@ namespace
         HWND hwnd{};
         RECT rect{};
     };
+    struct ParentPickResult;
 
     void RefreshPropertyPanel();
     void RebuildRuntimeControls();
@@ -655,6 +671,32 @@ namespace
         DeleteObject(solidPen);
         DeleteObject(handleBrush);
     }
+
+    void DrawCreationOverlay(HDC hdc)
+    {
+        if (!g_hDesign || !hdc || !g_create.drawing)
+            return;
+
+        RECT rc = ModelRectToClient(g_create.previewRect);
+        RECT client{};
+        GetClientRect(g_hDesign, &client);
+        if (!IntersectRect(&rc, &rc, &client))
+            return;
+
+        const COLORREF accent = RGB(0, 160, 80);
+        const int originalRop = SetROP2(hdc, R2_NOTXORPEN);
+        HPEN dashPen = CreatePen(PS_DOT, 1, accent);
+        HBRUSH nullBrush = (HBRUSH)GetStockObject(NULL_BRUSH);
+        HPEN oldPen = (HPEN)SelectObject(hdc, dashPen);
+        HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, nullBrush);
+
+        Rectangle(hdc, rc.left, rc.top, rc.right, rc.bottom);
+
+        SelectObject(hdc, oldPen);
+        SelectObject(hdc, oldBrush);
+        SetROP2(hdc, originalRop);
+        DeleteObject(dashPen);
+    }
 }
 
 // -----------------------------------------------------------------------------
@@ -1069,9 +1111,11 @@ namespace
             {
                 if (g_hwndControls[i] == hwnd)
                 {
-                    SetSelectedIndex(i);
                     POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                     POINT designPt = ClientToDesign(hwnd, pt);
+                    if (BeginCreateDrag(designPt))
+                        return 0;
+                    SetSelectedIndex(i);
                     if (BeginDrag(designPt))
                         return 0;
                     break;
@@ -1082,11 +1126,33 @@ namespace
 
         case WM_MOUSEMOVE:
         {
-            if (g_drag.active)
+            if (g_create.drawing)
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT designPt = ClientToDesign(hwnd, pt);
+                UpdateCreateDrag(designPt);
+                return 0;
+            }
+            else if (g_drag.active)
             {
                 POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                 POINT designPt = ClientToDesign(hwnd, pt);
                 UpdateDrag(designPt);
+                return 0;
+            }
+            break;
+        }
+
+        case WM_LBUTTONUP:
+        {
+            if (g_create.drawing)
+            {
+                EndCreateDrag();
+                return 0;
+            }
+            if (g_drag.active)
+            {
+                EndDrag();
                 return 0;
             }
             break;
@@ -1118,16 +1184,6 @@ namespace
         case WM_SHOWWINDOW:
             RedrawDesignOverlay();
             break;
-
-        case WM_LBUTTONUP:
-        {
-            if (g_drag.active)
-            {
-                EndDrag();
-                return 0;
-            }
-            break;
-        }
 
         case WM_CLOSE:
             // Embedded children should not close in editor
@@ -1803,6 +1859,7 @@ namespace
         IDM_EXPORT,
         IDM_EXPORT_FILE,
         IDM_IMPORT,
+        IDM_TOGGLE_DRAW_MODE,
 
         IDM_ADD_STATIC,
         IDM_ADD_BUTTON,
@@ -1994,18 +2051,13 @@ namespace
     }
 
 
-    void AddControl(wui::ControlType type)
+    int CreateControlWithRect(wui::ControlType type, RECT rc, const ParentPickResult& parentChoice)
     {
-        ParentPickResult parentChoice = DefaultParentForNewControl();
-        if (auto picked = PickParentFromMenu(parentChoice, -1))
-            parentChoice = *picked;
-
-        RECT rc{ 20, 20, 150, 40 };
-        if (!CurrentControls().empty())
-        {
-            rc = CurrentControls().back().rect;
-            OffsetRect(&rc, 10, 10);
-        }
+        rc.left = SnapToGrid(rc.left);
+        rc.top = SnapToGrid(rc.top);
+        rc.right = SnapToGrid(rc.right);
+        rc.bottom = SnapToGrid(rc.bottom);
+        rc = ClampToDesignSurface(rc);
 
         wui::ControlDef c{};
         c.type = type;
@@ -2043,6 +2095,97 @@ namespace
             RefreshPropertyPanel();
             RedrawDesignOverlay();
         }
+
+        return g_selectedIndex;
+    }
+
+    RECT NormalizeRect(const POINT& a, const POINT& b)
+    {
+        RECT rc{};
+        rc.left = std::min(a.x, b.x);
+        rc.top = std::min(a.y, b.y);
+        rc.right = std::max(a.x, b.x);
+        rc.bottom = std::max(a.y, b.y);
+        return rc;
+    }
+
+    void StartPendingCreation(wui::ControlType type, const ParentPickResult& parentChoice)
+    {
+        g_create = {};
+        g_create.pending = true;
+        g_create.type = type;
+        g_create.parentChoice = parentChoice;
+        RedrawDesignOverlay();
+    }
+
+    void UpdateCreatePreview(const POINT& current)
+    {
+        if (!g_create.drawing)
+            return;
+
+        RECT rc = NormalizeRect(g_create.startPt, current);
+        rc.left = SnapToGrid(rc.left);
+        rc.top = SnapToGrid(rc.top);
+        rc.right = SnapToGrid(rc.right);
+        rc.bottom = SnapToGrid(rc.bottom);
+        g_create.previewRect = ClampToDesignSurface(rc);
+        RedrawDesignOverlay();
+    }
+
+    bool BeginCreateDrag(const POINT& designPt)
+    {
+        if (!g_create.pending)
+            return false;
+
+        g_create.drawing = true;
+        g_create.startPt = designPt;
+        UpdateCreatePreview(designPt);
+        SetCapture(g_hDesign);
+        return true;
+    }
+
+    void UpdateCreateDrag(const POINT& designPt)
+    {
+        if (!g_create.drawing)
+            return;
+
+        UpdateCreatePreview(designPt);
+    }
+
+    void EndCreateDrag()
+    {
+        if (!g_create.drawing)
+            return;
+
+        const RECT finalRect = g_create.previewRect;
+        const auto type = g_create.type;
+        const auto parentChoice = g_create.parentChoice;
+        g_create = {};
+        ReleaseCapture();
+        CreateControlWithRect(type, finalRect, parentChoice);
+    }
+
+
+    void AddControl(wui::ControlType type)
+    {
+        ParentPickResult parentChoice = DefaultParentForNewControl();
+        if (auto picked = PickParentFromMenu(parentChoice, -1))
+            parentChoice = *picked;
+
+        RECT rc{ 20, 20, 150, 40 };
+        if (!CurrentControls().empty())
+        {
+            rc = CurrentControls().back().rect;
+            OffsetRect(&rc, 10, 10);
+        }
+
+        if (g_drawToCreateMode)
+        {
+            StartPendingCreation(type, parentChoice);
+            return;
+        }
+
+        CreateControlWithRect(type, rc, parentChoice);
     }
 
     void ApplyZOrderCommand(ZOrderCommand cmd)
@@ -2159,6 +2302,8 @@ namespace
         AppendMenuW(hFile, MF_STRING, IDM_EXPORT_FILE, L"Export to &File...");
         AppendMenuW(hFile, MF_STRING, IDM_IMPORT, L"&Import from C/C++...");
 
+        AppendMenuW(hInsert, MF_STRING | (g_drawToCreateMode ? MF_CHECKED : 0), IDM_TOGGLE_DRAW_MODE, L"Draw to Create");
+        AppendMenuW(hInsert, MF_SEPARATOR, 0, nullptr);
         AppendMenuW(hInsert, MF_STRING, IDM_ADD_STATIC, L"Static");
         AppendMenuW(hInsert, MF_STRING, IDM_ADD_BUTTON, L"Button");
         AppendMenuW(hInsert, MF_STRING, IDM_ADD_EDIT, L"Edit");
@@ -2180,6 +2325,43 @@ namespace
         AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
 
         SetMenu(hwnd, hMenuBar);
+        g_hInsertMenu = hInsert;
+    }
+
+    void BuildToolbar(HWND hwnd)
+    {
+        g_hToolbar = CreateWindowExW(
+            0, TOOLBARCLASSNAMEW, nullptr,
+            WS_CHILD | WS_VISIBLE | TBSTYLE_FLAT | TBSTYLE_TOOLTIPS | CCS_NORESIZE | CCS_NODIVIDER,
+            0, 0, 0, 0,
+            hwnd, nullptr, g_hInst, nullptr);
+
+        if (!g_hToolbar)
+            return;
+
+        SendMessageW(g_hToolbar, TB_BUTTONSTRUCTSIZE, sizeof(TBBUTTON), 0);
+        SendMessageW(g_hToolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_MIXEDBUTTONS);
+        SendMessageW(g_hToolbar, TB_SETBUTTONSIZE, 0, MAKELONG(90, 24));
+
+        int strId = (int)SendMessageW(g_hToolbar, TB_ADDSTRING, 0, (LPARAM)L"Draw to create");
+        TBBUTTON btn{};
+        btn.iBitmap = I_IMAGENONE;
+        btn.idCommand = IDM_TOGGLE_DRAW_MODE;
+        btn.fsState = TBSTATE_ENABLED | (g_drawToCreateMode ? TBSTATE_CHECKED : 0);
+        btn.fsStyle = BTNS_CHECK | BTNS_AUTOSIZE | BTNS_SHOWTEXT;
+        btn.iString = strId;
+        SendMessageW(g_hToolbar, TB_ADDBUTTONS, 1, (LPARAM)&btn);
+        SendMessageW(g_hToolbar, TB_AUTOSIZE, 0, 0);
+        ShowWindow(g_hToolbar, SW_SHOW);
+    }
+
+    void UpdatePlacementModeUI()
+    {
+        if (g_hInsertMenu)
+            CheckMenuItem(g_hInsertMenu, IDM_TOGGLE_DRAW_MODE, MF_BYCOMMAND | (g_drawToCreateMode ? MF_CHECKED : MF_UNCHECKED));
+
+        if (g_hToolbar)
+            SendMessageW(g_hToolbar, TB_CHECKBUTTON, IDM_TOGGLE_DRAW_MODE, MAKELONG(g_drawToCreateMode ? TRUE : FALSE, 0));
     }
 }
 
@@ -2401,18 +2583,29 @@ namespace
         RECT rcClient{};
         GetClientRect(hwnd, &rcClient);
 
+        int toolbarHeight = 0;
+        if (g_hToolbar && ::IsWindow(g_hToolbar))
+        {
+            SendMessageW(g_hToolbar, TB_AUTOSIZE, 0, 0);
+            RECT rcTb{};
+            GetWindowRect(g_hToolbar, &rcTb);
+            toolbarHeight = rcTb.bottom - rcTb.top;
+            MoveWindow(g_hToolbar, 0, 0, rcClient.right, toolbarHeight, TRUE);
+        }
+
         const int propW = kPropPanelWidth;
         const int designRight = rcClient.right - propW;
+        const int contentTop = toolbarHeight;
 
         if (g_hDesign)
         {
             int w = std::max<int>(designRight - 2 * kDesignMargin, 100);
-            int h = std::max<int>(rcClient.bottom - 2 * kDesignMargin, 100);
+            int h = std::max<int>(rcClient.bottom - contentTop - 2 * kDesignMargin, 100);
 
             MoveWindow(
                 g_hDesign,
                 kDesignMargin,
-                kDesignMargin,
+                contentTop + kDesignMargin,
                 w,
                 h,
                 TRUE
@@ -2424,9 +2617,9 @@ namespace
             MoveWindow(
                 g_hPropPanel,
                 designRight,
-                0,
+                contentTop,
                 propW,
-                rcClient.bottom,
+                rcClient.bottom - contentTop,
                 TRUE
             );
 
@@ -2468,6 +2661,8 @@ namespace
         {
             POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
             POINT designPt = pt;
+            if (BeginCreateDrag(designPt))
+                return 0;
             if (BeginDrag(designPt))
                 return 0;
 
@@ -2479,7 +2674,13 @@ namespace
 
         case WM_MOUSEMOVE:
         {
-            if (g_drag.active)
+            if (g_create.drawing)
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                UpdateCreateDrag(pt);
+                return 0;
+            }
+            else if (g_drag.active)
             {
                 POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                 UpdateDrag(pt);
@@ -2490,7 +2691,12 @@ namespace
 
         case WM_LBUTTONUP:
         {
-            if (g_drag.active)
+            if (g_create.drawing)
+            {
+                EndCreateDrag();
+                return 0;
+            }
+            else if (g_drag.active)
             {
                 EndDrag();
                 return 0;
@@ -2535,6 +2741,7 @@ namespace
             if (hdc)
             {
                 FillRect(hdc, &ps.rcPaint, (HBRUSH)(COLOR_WINDOW + 1));
+                DrawCreationOverlay(hdc);
                 DrawSelectionOverlay(hdc);
             }
             EndPaint(hwnd, &ps);
@@ -2574,8 +2781,10 @@ namespace
             g_originalDesignProc = (WNDPROC)GetWindowLongPtrW(g_hDesign, GWLP_WNDPROC);
             SetWindowLongPtrW(g_hDesign, GWLP_WNDPROC, (LONG_PTR)DesignWndProc);
 
+            BuildToolbar(hwnd);
             CreatePropertyPanel(hwnd);
             BuildMenus(hwnd);
+            UpdatePlacementModeUI();
             LayoutChildren(hwnd);
 
             return 0;
@@ -2737,6 +2946,15 @@ namespace
 
             case IDM_IMPORT:
                 ImportFromCppSource();
+                return 0;
+
+            case IDM_TOGGLE_DRAW_MODE:
+                g_drawToCreateMode = !g_drawToCreateMode;
+                if (g_create.drawing)
+                    ReleaseCapture();
+                g_create = {};
+                UpdatePlacementModeUI();
+                RedrawDesignOverlay();
                 return 0;
 
             case IDM_ADD_STATIC:   AddControl(wui::ControlType::Static);   return 0;
