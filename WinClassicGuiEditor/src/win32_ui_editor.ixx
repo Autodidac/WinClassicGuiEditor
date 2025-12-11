@@ -111,6 +111,7 @@ namespace
     void RebuildZOrderListItems();
     void SyncZOrderSelection();
     void UpdateZOrderButtons();
+    void RestackAndRefreshSelection();
     void ApplyZOrderToWindows();
     void EndDrag();
     ParentInfo GetParentInfoFor(const wui::ControlDef& c);
@@ -681,6 +682,13 @@ namespace
         g_inZListUpdate = false;
 
         UpdateZOrderButtons();
+    }
+
+    void RestackAndRefreshSelection()
+    {
+        ApplyZOrderToWindows();
+        RedrawDesignOverlay();
+        SyncZOrderSelection();
     }
 
     void RebuildZOrderListItems()
@@ -1720,11 +1728,9 @@ namespace
         g_selectedIndex = oldToNew[oldIndex];
 
         RebuildRuntimeControls();
-        ApplyZOrderToWindows();
         RebuildZOrderListItems();
         RefreshPropertyPanel();
-        RedrawDesignOverlay();
-        SyncZOrderSelection();
+        RestackAndRefreshSelection();
     }
 
     void ShowArrangeContextMenu(POINT screenPt)
@@ -2227,7 +2233,10 @@ namespace
             {
                 int sel = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETCURSEL, 0, 0));
                 if (sel >= 0 && sel < static_cast<int>(CurrentControls().size()))
+                {
                     SetSelectedIndex(sel);
+                    RestackAndRefreshSelection();
+                }
                 return 0;
             }
 
