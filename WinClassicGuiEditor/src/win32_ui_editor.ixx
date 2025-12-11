@@ -33,6 +33,8 @@ namespace
     HWND      g_hPropPanel{};
     HWND      g_hTabPageLabel{};
     HWND      g_hTabPageCombo{};
+    HWND      g_hHierarchyTree{};
+    HWND      g_hReparentBtn{};
     HWND      g_hZOrderList{};
     HWND      g_hZBringFront{};
     HWND      g_hZSendBack{};
@@ -40,7 +42,9 @@ namespace
     HWND      g_hZBackward{};
 
     int       g_zListTop{ 0 };
+    int       g_treeTop{ 0 };
     bool      g_inZListUpdate{ false };
+    bool      g_inTreeUpdate{ false };
 
     constexpr int kDesignMargin = 8;
     constexpr int kPropPanelWidth = 320;
@@ -63,6 +67,7 @@ namespace
     // Runtime HWNDs per control index
     vector<HWND> g_hwndControls;
     std::unordered_map<int, std::vector<HWND>> g_tabPageContainers;
+    std::vector<HTREEITEM> g_treeItems;
 
     // Subclassing map for live controls
     std::unordered_map<HWND, WNDPROC> g_originalProcs;
@@ -109,8 +114,11 @@ namespace
 
     void RefreshPropertyPanel();
     void RebuildRuntimeControls();
+    void RebuildHierarchyTree();
+    std::wstring HierarchyLabelForControl(const wui::ControlDef& c, int idx);
     void RebuildZOrderListItems();
     void SyncZOrderSelection();
+    void SyncHierarchySelection();
     void UpdateZOrderButtons();
     void RestackAndRefreshSelection();
     void ApplyZOrderToWindows();
@@ -259,7 +267,9 @@ namespace
         g_selectedIndex = idx;
         InvalidateRect(g_hDesign, nullptr, TRUE);
         RefreshPropertyPanel();
+        RebuildZOrderListItems();
         SyncZOrderSelection();
+        SyncHierarchySelection();
         UpdateZOrderButtons();
     }
 
@@ -653,6 +663,35 @@ namespace
 
 namespace
 {
+    bool IsContainerControl(const wui::ControlDef& c)
+    {
+        return c.isContainer || wui::is_container_type(c.type);
+    }
+
+    std::vector<int> CollectSiblings(int parentIndex)
+    {
+        std::vector<int> siblings;
+        siblings.reserve(CurrentControls().size());
+
+        for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
+        {
+            if (CurrentControls()[i].parentIndex == parentIndex)
+                siblings.push_back(i);
+        }
+
+        return siblings;
+    }
+
+    int IndexInSiblings(int idx, const std::vector<int>& siblings)
+    {
+        for (size_t i = 0; i < siblings.size(); ++i)
+        {
+            if (siblings[i] == idx)
+                return static_cast<int>(i);
+        }
+        return -1;
+    }
+
     wstring ZOrderLabelForControl(const wui::ControlDef& c, int idx)
     {
         wstring label = std::format(L"{}: {}", idx, wui::ControlTypeLabel(c.type));
@@ -669,14 +708,21 @@ namespace
                 if (h) EnableWindow(h, on);
             };
 
-        const int count = static_cast<int>(CurrentControls().size());
         const int idx = g_selectedIndex;
-        const bool hasSel = (idx >= 0 && idx < count);
+        const bool hasSel = (idx >= 0 && idx < static_cast<int>(CurrentControls().size()));
 
-        set_enabled(g_hZBringFront, hasSel && idx < count - 1);
-        set_enabled(g_hZForward, hasSel && idx < count - 1);
-        set_enabled(g_hZSendBack, hasSel && idx > 0);
-        set_enabled(g_hZBackward, hasSel && idx > 0);
+        int parentIdx = -1;
+        if (hasSel)
+            parentIdx = CurrentControls()[idx].parentIndex;
+
+        auto siblings = CollectSiblings(parentIdx);
+        const int pos = hasSel ? IndexInSiblings(idx, siblings) : -1;
+        const int last = static_cast<int>(siblings.size()) - 1;
+
+        set_enabled(g_hZBringFront, hasSel && pos >= 0 && pos < last);
+        set_enabled(g_hZForward, hasSel && pos >= 0 && pos < last);
+        set_enabled(g_hZSendBack, hasSel && pos > 0);
+        set_enabled(g_hZBackward, hasSel && pos > 0);
     }
 
     void SyncZOrderSelection()
@@ -685,10 +731,14 @@ namespace
             return;
 
         g_inZListUpdate = true;
+        int parentIdx = -1;
         if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
-            SendMessageW(g_hZOrderList, LB_SETCURSEL, g_selectedIndex, 0);
-        else
-            SendMessageW(g_hZOrderList, LB_SETCURSEL, (WPARAM)-1, 0);
+            parentIdx = CurrentControls()[g_selectedIndex].parentIndex;
+
+        auto siblings = CollectSiblings(parentIdx);
+        const int pos = IndexInSiblings(g_selectedIndex, siblings);
+
+        SendMessageW(g_hZOrderList, LB_SETCURSEL, (pos >= 0) ? pos : (WPARAM)-1, 0);
         g_inZListUpdate = false;
 
         UpdateZOrderButtons();
@@ -699,6 +749,7 @@ namespace
         ApplyZOrderToWindows();
         RedrawDesignOverlay();
         SyncZOrderSelection();
+        SyncHierarchySelection();
     }
 
     void RebuildZOrderListItems()
@@ -709,22 +760,105 @@ namespace
         g_inZListUpdate = true;
         SendMessageW(g_hZOrderList, LB_RESETCONTENT, 0, 0);
 
-        for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
+        int parentIdx = -1;
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+            parentIdx = CurrentControls()[g_selectedIndex].parentIndex;
+
+        auto siblings = CollectSiblings(parentIdx);
+        for (int idx : siblings)
         {
-            const auto& c = CurrentControls()[i];
-            wstring label = ZOrderLabelForControl(c, i);
+            const auto& c = CurrentControls()[idx];
+            wstring label = ZOrderLabelForControl(c, idx);
             int pos = static_cast<int>(SendMessageW(g_hZOrderList, LB_ADDSTRING, 0, (LPARAM)label.c_str()));
-            SendMessageW(g_hZOrderList, LB_SETITEMDATA, pos, i);
+            SendMessageW(g_hZOrderList, LB_SETITEMDATA, pos, idx);
         }
 
-        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
-            SendMessageW(g_hZOrderList, LB_SETCURSEL, g_selectedIndex, 0);
-        else
-            SendMessageW(g_hZOrderList, LB_SETCURSEL, (WPARAM)-1, 0);
+        const int pos = IndexInSiblings(g_selectedIndex, siblings);
+        SendMessageW(g_hZOrderList, LB_SETCURSEL, (pos >= 0) ? pos : (WPARAM)-1, 0);
 
         g_inZListUpdate = false;
 
         UpdateZOrderButtons();
+    }
+}
+
+// -----------------------------------------------------------------------------
+// HIERARCHY TREE
+// -----------------------------------------------------------------------------
+
+namespace
+{
+    wstring HierarchyLabelForControl(const wui::ControlDef& c, int idx)
+    {
+        wstring label = std::format(L"{}: {}", idx, wui::ControlTypeLabel(c.type));
+        if (!c.text.empty())
+            label += std::format(L" - {}", c.text);
+        return label;
+    }
+
+    void SyncHierarchySelection()
+    {
+        if (!g_hHierarchyTree)
+            return;
+
+        if (g_treeItems.size() < CurrentControls().size())
+            g_treeItems.resize(CurrentControls().size(), nullptr);
+
+        g_inTreeUpdate = true;
+        HTREEITEM target = nullptr;
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(g_treeItems.size()))
+            target = g_treeItems[g_selectedIndex];
+
+        TreeView_SelectItem(g_hHierarchyTree, target);
+        g_inTreeUpdate = false;
+    }
+
+    void RebuildHierarchyTree()
+    {
+        if (!g_hHierarchyTree)
+            return;
+
+        g_inTreeUpdate = true;
+        TreeView_DeleteAllItems(g_hHierarchyTree);
+        g_treeItems.assign(CurrentControls().size(), nullptr);
+
+        const int count = static_cast<int>(CurrentControls().size());
+        std::vector<std::vector<int>> children(count);
+        std::vector<int> roots;
+
+        for (int i = 0; i < count; ++i)
+        {
+            int parent = CurrentControls()[i].parentIndex;
+            if (parent >= 0 && parent < count)
+                children[parent].push_back(i);
+            else
+                roots.push_back(i);
+        }
+
+        auto insertNode = [&](auto&& self, int idx, HTREEITEM hParent) -> void
+            {
+                TVINSERTSTRUCTW tvis{};
+                tvis.hParent = hParent ? hParent : TVI_ROOT;
+                tvis.hInsertAfter = TVI_LAST;
+                wstring label = HierarchyLabelForControl(CurrentControls()[idx], idx);
+                tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+                tvis.item.pszText = label.data();
+                tvis.item.lParam = idx;
+                HTREEITEM hItem = TreeView_InsertItemW(g_hHierarchyTree, &tvis);
+                g_treeItems[idx] = hItem;
+
+                if (IsContainerControl(CurrentControls()[idx]) && hItem)
+                    TreeView_Expand(g_hHierarchyTree, hItem, TVE_EXPAND);
+
+                for (int child : children[idx])
+                    self(self, child, hItem);
+            };
+
+        for (int root : roots)
+            insertNode(insertNode, root, nullptr);
+
+        g_inTreeUpdate = false;
+        SyncHierarchySelection();
     }
 }
 
@@ -739,6 +873,7 @@ namespace
     constexpr int IDC_ZORDER_SEND_BACK = 302;
     constexpr int IDC_ZORDER_FORWARD = 303;
     constexpr int IDC_ZORDER_BACKWARD = 304;
+    constexpr int IDC_REPARENT_BTN = 305;
 
     enum class PropIndex
     {
@@ -1501,6 +1636,23 @@ namespace
             {
                 result += L"\n";
             }
+
+            int parentId = -1;
+            if (c.parentIndex >= 0 && c.parentIndex < static_cast<int>(CurrentControls().size()))
+                parentId = CurrentControls()[c.parentIndex].id;
+
+            result += std::format(L"// HIERARCHY child={} parent={}", c.id, parentId);
+            if (parentId >= 0 &&
+                c.parentIndex >= 0 &&
+                c.parentIndex < static_cast<int>(CurrentControls().size()) &&
+                CurrentControls()[c.parentIndex].type == wui::ControlType::Tab)
+            {
+                int page = NormalizedTabPage(c.parentIndex, c.tabPageId);
+                if (page < 0)
+                    page = 0;
+                result += std::format(L" page={}", page);
+            }
+            result += L"\n\n";
         }
 
         return result;
@@ -1628,6 +1780,7 @@ namespace
 
         RebuildZOrderListItems();
         RebuildRuntimeControls();
+        RebuildHierarchyTree();
         RefreshPropertyPanel();
         RedrawDesignOverlay();
 
@@ -1677,8 +1830,176 @@ namespace
         MoveBackward,
     };
 
+    struct ParentPickResult
+    {
+        int parentIndex{ -1 };
+        int tabPageId{ -1 };
+    };
+
+    bool IsDescendant(int possibleParent, int child)
+    {
+        if (possibleParent < 0 || possibleParent >= static_cast<int>(CurrentControls().size()))
+            return false;
+
+        int cursor = possibleParent;
+        while (cursor >= 0 && cursor < static_cast<int>(CurrentControls().size()))
+        {
+            if (cursor == child)
+                return true;
+            cursor = CurrentControls()[cursor].parentIndex;
+        }
+        return false;
+    }
+
+    ParentPickResult DefaultParentForNewControl()
+    {
+        ParentPickResult result{};
+
+        if (g_selectedIndex >= 0 && g_selectedIndex < static_cast<int>(CurrentControls().size()))
+        {
+            int candidate = g_selectedIndex;
+            if (!IsContainerControl(CurrentControls()[candidate]))
+                candidate = CurrentControls()[candidate].parentIndex;
+
+            if (candidate >= 0 && candidate < static_cast<int>(CurrentControls().size()) &&
+                IsContainerControl(CurrentControls()[candidate]))
+            {
+                result.parentIndex = candidate;
+                if (CurrentControls()[candidate].type == wui::ControlType::Tab)
+                {
+                    int page = 0;
+                    if (candidate < static_cast<int>(g_hwndControls.size()) && g_hwndControls[candidate])
+                    {
+                        page = TabCtrl_GetCurSel(g_hwndControls[candidate]);
+                        if (page < 0) page = 0;
+                    }
+                    result.tabPageId = page;
+                }
+            }
+        }
+
+        return result;
+    }
+
+    std::optional<ParentPickResult> PickParentFromMenu(const ParentPickResult& def, int excludeChild)
+    {
+        HMENU hMenu = CreatePopupMenu();
+        if (!hMenu)
+            return std::nullopt;
+
+        std::vector<std::pair<UINT, ParentPickResult>> map;
+        auto addChoice = [&](const wstring& text, int parent, int page, bool checked)
+            {
+                UINT id = 50000 + static_cast<UINT>(map.size());
+                AppendMenuW(hMenu, MF_STRING | (checked ? MF_CHECKED : 0), id, text.c_str());
+                map.push_back({ id, ParentPickResult{ parent, page } });
+            };
+
+        addChoice(L"Top-level (no parent)", -1, -1, def.parentIndex == -1);
+
+        for (int i = 0; i < static_cast<int>(CurrentControls().size()); ++i)
+        {
+            if (i == excludeChild)
+                continue;
+
+            const auto& c = CurrentControls()[i];
+            if (!IsContainerControl(c))
+                continue;
+
+            if (excludeChild >= 0 && IsDescendant(i, excludeChild))
+                continue;
+
+            wstring label = HierarchyLabelForControl(c, i);
+            if (c.type == wui::ControlType::Tab)
+            {
+                HMENU hSub = CreatePopupMenu();
+                const auto& pages = TabPagesFor(c);
+                for (size_t pi = 0; pi < pages.size(); ++pi)
+                {
+                    UINT id = 50000 + static_cast<UINT>(map.size());
+                    AppendMenuW(hSub, MF_STRING | ((def.parentIndex == i && def.tabPageId == static_cast<int>(pi)) ? MF_CHECKED : 0), id, pages[pi].c_str());
+                    map.push_back({ id, ParentPickResult{ i, static_cast<int>(pi) } });
+                }
+
+                AppendMenuW(hMenu, MF_POPUP, (UINT_PTR)hSub, label.c_str());
+            }
+            else
+            {
+                addChoice(label, i, -1, def.parentIndex == i);
+            }
+        }
+
+        POINT pt{};
+        GetCursorPos(&pt);
+        UINT cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN, pt.x, pt.y, 0, g_hMain, nullptr);
+        DestroyMenu(hMenu);
+
+        if (cmd == 0)
+            return std::nullopt;
+
+        for (auto& [id, res] : map)
+        {
+            if (id == cmd)
+                return res;
+        }
+
+        return std::nullopt;
+    }
+
+    int NormalizedTabPage(int tabIndex, int requested)
+    {
+        if (tabIndex < 0 || tabIndex >= static_cast<int>(CurrentControls().size()))
+            return -1;
+
+        const auto& pages = TabPagesFor(CurrentControls()[tabIndex]);
+        if (pages.empty())
+            return -1;
+
+        if (requested < 0 || requested >= static_cast<int>(pages.size()))
+            return 0;
+
+        return requested;
+    }
+
+    bool ApplyParentChoice(int childIdx, const ParentPickResult& choice)
+    {
+        const int count = static_cast<int>(CurrentControls().size());
+        if (childIdx < 0 || childIdx >= count)
+            return false;
+
+        if (choice.parentIndex == childIdx)
+            return false;
+
+        if (choice.parentIndex >= count)
+            return false;
+
+        if (choice.parentIndex >= 0 && IsDescendant(choice.parentIndex, childIdx))
+            return false;
+
+        auto& child = CurrentControls()[childIdx];
+        child.parentIndex = choice.parentIndex;
+
+        if (choice.parentIndex >= 0 && CurrentControls()[choice.parentIndex].type == wui::ControlType::Tab)
+            child.tabPageId = NormalizedTabPage(choice.parentIndex, choice.tabPageId);
+        else
+            child.tabPageId = -1;
+
+        RebuildRuntimeControls();
+        RebuildHierarchyTree();
+        RebuildZOrderListItems();
+        RefreshPropertyPanel();
+        RedrawDesignOverlay();
+        RestackAndRefreshSelection();
+        return true;
+    }
+
+
     void AddControl(wui::ControlType type)
     {
+        ParentPickResult parentChoice = DefaultParentForNewControl();
+        if (auto picked = PickParentFromMenu(parentChoice, -1))
+            parentChoice = *picked;
+
         RECT rc{ 20, 20, 150, 40 };
         if (!CurrentControls().empty())
         {
@@ -1695,7 +2016,16 @@ namespace
         c.className = wui::DefaultClassName(type);
         if (type == wui::ControlType::Tab)
             c.tabPages = { L"Page 1", L"Page 2" };
-        c.parentIndex = -1;
+        c.parentIndex = parentChoice.parentIndex;
+        if (c.parentIndex >= 0 && c.parentIndex < static_cast<int>(CurrentControls().size()) &&
+            CurrentControls()[c.parentIndex].type == wui::ControlType::Tab)
+        {
+            c.tabPageId = (parentChoice.tabPageId >= 0) ? parentChoice.tabPageId : 0;
+        }
+        else
+        {
+            c.tabPageId = -1;
+        }
         c.isContainer = (type == wui::ControlType::GroupBox ||
             type == wui::ControlType::Tab ||
             type == wui::ControlType::ListBox ||
@@ -1705,10 +2035,14 @@ namespace
         CurrentControls().push_back(std::move(c));
         g_selectedIndex = (int)CurrentControls().size() - 1;
 
-        RebuildRuntimeControls();
-        RefreshPropertyPanel();
-        RedrawDesignOverlay();
-        RebuildZOrderListItems();
+        if (!ApplyParentChoice(g_selectedIndex, parentChoice))
+        {
+            RebuildRuntimeControls();
+            RebuildHierarchyTree();
+            RebuildZOrderListItems();
+            RefreshPropertyPanel();
+            RedrawDesignOverlay();
+        }
     }
 
     void ApplyZOrderCommand(ZOrderCommand cmd)
@@ -1718,35 +2052,58 @@ namespace
 
         const int count = static_cast<int>(CurrentControls().size());
         const int oldIndex = g_selectedIndex;
-        int newIndex = oldIndex;
-        const int last = count - 1;
+        const int parentIdx = CurrentControls()[oldIndex].parentIndex;
+
+        std::vector<int> siblings = CollectSiblings(parentIdx);
+        const int oldPos = IndexInSiblings(oldIndex, siblings);
+        int newPos = oldPos;
+
+        if (oldPos < 0)
+            return;
 
         switch (cmd)
         {
-        case ZOrderCommand::BringToFront: newIndex = last; break;
-        case ZOrderCommand::SendToBack:   newIndex = 0;   break;
-        case ZOrderCommand::MoveForward:  newIndex = std::min(last, oldIndex + 1); break;
-        case ZOrderCommand::MoveBackward: newIndex = std::max(0, oldIndex - 1); break;
+        case ZOrderCommand::BringToFront: newPos = static_cast<int>(siblings.size()) - 1; break;
+        case ZOrderCommand::SendToBack:   newPos = 0;   break;
+        case ZOrderCommand::MoveForward:  newPos = std::min(static_cast<int>(siblings.size()) - 1, oldPos + 1); break;
+        case ZOrderCommand::MoveBackward: newPos = std::max(0, oldPos - 1); break;
         }
 
-        if (newIndex == oldIndex)
+        if (newPos == oldPos)
             return;
 
+        auto newSiblingOrder = siblings;
+        int movedId = siblings[oldPos];
+        newSiblingOrder.erase(newSiblingOrder.begin() + oldPos);
+        newSiblingOrder.insert(newSiblingOrder.begin() + newPos, movedId);
+
+        std::unordered_set<int> siblingSet(siblings.begin(), siblings.end());
         std::vector<int> order(count);
         std::iota(order.begin(), order.end(), 0);
 
-        int movedId = order[oldIndex];
-        order.erase(order.begin() + oldIndex);
-        order.insert(order.begin() + newIndex, movedId);
+        std::vector<int> rebuiltOrder;
+        rebuiltOrder.reserve(count);
+        size_t sibCursor = 0;
+        for (int idx : order)
+        {
+            if (siblingSet.contains(idx))
+            {
+                rebuiltOrder.push_back(newSiblingOrder[sibCursor++]);
+            }
+            else
+            {
+                rebuiltOrder.push_back(idx);
+            }
+        }
 
         std::vector<int> oldToNew(count, -1);
         for (int i = 0; i < count; ++i)
-            oldToNew[order[i]] = i;
+            oldToNew[rebuiltOrder[i]] = i;
 
         auto reordered = CurrentControls();
         for (int i = 0; i < count; ++i)
         {
-            auto c = CurrentControls()[order[i]];
+            auto c = CurrentControls()[rebuiltOrder[i]];
             if (c.parentIndex >= 0 && c.parentIndex < count)
                 c.parentIndex = oldToNew[c.parentIndex];
             reordered[i] = std::move(c);
@@ -1757,6 +2114,7 @@ namespace
 
         RebuildRuntimeControls();
         RebuildZOrderListItems();
+        RebuildHierarchyTree();
         RefreshPropertyPanel();
         RestackAndRefreshSelection();
     }
@@ -1767,11 +2125,17 @@ namespace
         if (!hMenu)
             return;
 
-        const int count = static_cast<int>(CurrentControls().size());
         const int idx = g_selectedIndex;
-        const bool hasSel = (idx >= 0 && idx < count);
-        const bool canFront = hasSel && idx < count - 1;
-        const bool canBack = hasSel && idx > 0;
+        const bool hasSel = (idx >= 0 && idx < static_cast<int>(CurrentControls().size()));
+
+        int parentIdx = -1;
+        if (hasSel)
+            parentIdx = CurrentControls()[idx].parentIndex;
+
+        auto siblings = CollectSiblings(parentIdx);
+        const int pos = hasSel ? IndexInSiblings(idx, siblings) : -1;
+        const bool canFront = hasSel && pos >= 0 && pos < static_cast<int>(siblings.size()) - 1;
+        const bool canBack = hasSel && pos > 0;
 
         AppendMenuW(hMenu, MF_STRING | (canFront ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_BRING_FRONT, L"Bring to Front");
         AppendMenuW(hMenu, MF_STRING | (canFront ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_FORWARD, L"Move Forward");
@@ -1921,7 +2285,29 @@ namespace
         ShowWindow(g_hTabPageLabel, SW_HIDE);
         ShowWindow(g_hTabPageCombo, SW_HIDE);
 
-        y += 40;
+        y += 32;
+
+        CreateWindowExW(
+            0, L"STATIC", L"Hierarchy:",
+            WS_CHILD | WS_VISIBLE,
+            8, y, 100, 18,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        g_treeTop = y + 20;
+        g_hHierarchyTree = CreateWindowExW(
+            WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
+            8, g_treeTop, kPropPanelWidth - 16, 180,
+            g_hPropPanel, nullptr, g_hInst, nullptr);
+
+        y = g_treeTop + 188;
+        g_hReparentBtn = CreateWindowExW(
+            0, L"BUTTON", L"Reparent Selection...",
+            WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+            8, y, kPropPanelWidth - 16, 24,
+            g_hPropPanel, (HMENU)(INT_PTR)IDC_REPARENT_BTN, g_hInst, nullptr);
+
+        y += 36;
         CreateWindowExW(
             0, L"STATIC", L"Z-Order:",
             WS_CHILD | WS_VISIBLE,
@@ -1977,9 +2363,22 @@ namespace
         const int margin = 8;
         const int buttonHeight = 24;
         const int buttonSpacing = 6;
+        const int treeTop = g_treeTop;
         const int listTop = g_zListTop;
         const int minListHeight = 80;
+        const int minTreeHeight = 80;
         const int listWidth = kPropPanelWidth - margin * 2;
+
+        int treeHeight = std::max(minTreeHeight,
+            listTop - treeTop - buttonHeight - buttonSpacing - margin);
+        if (g_hHierarchyTree)
+            MoveWindow(g_hHierarchyTree, margin, treeTop, listWidth, treeHeight, TRUE);
+
+        if (g_hReparentBtn)
+        {
+            int reparentY = treeTop + treeHeight + buttonSpacing;
+            MoveWindow(g_hReparentBtn, margin, reparentY, listWidth, buttonHeight, TRUE);
+        }
 
         const int available = rc.bottom - listTop - (buttonHeight * 2 + buttonSpacing * 2 + margin);
         const int listHeight = std::max(minListHeight, available);
@@ -2049,6 +2448,13 @@ namespace
         case WM_NOTIFY:
         {
             auto hdr = reinterpret_cast<LPNMHDR>(lp);
+            if (hdr && hdr->hwndFrom == g_hHierarchyTree && hdr->code == TVN_SELCHANGEDW)
+            {
+                auto* tv = reinterpret_cast<NMTREEVIEWW*>(lp);
+                if (!g_inTreeUpdate)
+                    SetSelectedIndex(static_cast<int>(tv->itemNew.lParam));
+                return 0;
+            }
             if (hdr && hdr->code == TCN_SELCHANGE)
             {
                 int idx = FindControlIndexFromHwnd(hdr->hwndFrom);
@@ -2156,7 +2562,7 @@ namespace
         {
             INITCOMMONCONTROLSEX icc{};
             icc.dwSize = sizeof(icc);
-            icc.dwICC = ICC_WIN95_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES;
+            icc.dwICC = ICC_WIN95_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES;
             InitCommonControlsEx(&icc);
 
             g_hDesign = CreateWindowExW(
@@ -2274,10 +2680,14 @@ namespace
             if (id == IDC_ZORDER_LIST && code == LBN_SELCHANGE && !g_inZListUpdate)
             {
                 int sel = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETCURSEL, 0, 0));
-                if (sel >= 0 && sel < static_cast<int>(CurrentControls().size()))
+                if (sel >= 0)
                 {
-                    SetSelectedIndex(sel);
-                    RestackAndRefreshSelection();
+                    int idx = static_cast<int>(SendMessageW(g_hZOrderList, LB_GETITEMDATA, sel, 0));
+                    if (idx >= 0 && idx < static_cast<int>(CurrentControls().size()))
+                    {
+                        SetSelectedIndex(idx);
+                        RestackAndRefreshSelection();
+                    }
                 }
                 return 0;
             }
@@ -2286,6 +2696,17 @@ namespace
             {
                 switch (id)
                 {
+                case IDC_REPARENT_BTN:
+                {
+                    if (g_selectedIndex >= 0 &&
+                        g_selectedIndex < static_cast<int>(CurrentControls().size()))
+                    {
+                        ParentPickResult def{ CurrentControls()[g_selectedIndex].parentIndex, CurrentControls()[g_selectedIndex].tabPageId };
+                        if (auto picked = PickParentFromMenu(def, g_selectedIndex))
+                            ApplyParentChoice(g_selectedIndex, *picked);
+                    }
+                    return 0;
+                }
                 case IDC_ZORDER_BRING_FRONT: ApplyZOrderCommand(ZOrderCommand::BringToFront); return 0;
                 case IDC_ZORDER_SEND_BACK:   ApplyZOrderCommand(ZOrderCommand::SendToBack);   return 0;
                 case IDC_ZORDER_FORWARD:     ApplyZOrderCommand(ZOrderCommand::MoveForward);  return 0;
@@ -2301,6 +2722,7 @@ namespace
                 g_selectedIndex = -1;
                 RebuildZOrderListItems();
                 RebuildRuntimeControls();
+                RebuildHierarchyTree();
                 RefreshPropertyPanel();
                 RedrawDesignOverlay();
                 return 0;
