@@ -6,6 +6,10 @@ module;
 #include <commdlg.h>
 #include <fstream>
 
+#ifndef TPM_RC_ANCHOR
+#define TPM_RC_ANCHOR 0x0000
+#endif
+
 #pragma comment(lib, "Comctl32.lib")
 
 export module win32_ui_editor;
@@ -27,7 +31,12 @@ using std::to_wstring;
 
 namespace
 {
-    struct ZOrderNodeData;
+    struct ZOrderNodeData
+    {
+        int  controlIndex{ -1 };
+        int  tabPage{ -1 };
+        bool isPageNode{ false };
+    };
     HINSTANCE g_hInst{};
     HWND      g_hMain{};
     HWND      g_hDesign{};
@@ -104,6 +113,8 @@ namespace
 
     DragState g_drag{};
 
+    struct ParentPickResult;
+
     struct CreationState
     {
         bool pending{ false };
@@ -130,7 +141,6 @@ namespace
         HWND hwnd{};
         RECT rect{};
     };
-    struct ParentPickResult;
 
     void RefreshPropertyPanel();
     void RebuildRuntimeControls();
@@ -144,6 +154,9 @@ namespace
     void RestackAndRefreshSelection();
     void ApplyZOrderToWindows();
     void EndDrag();
+    bool BeginCreateDrag(const POINT& designPt);
+    bool UpdateCreateDrag(const POINT& designPt);
+    void EndCreateDrag();
     ParentInfo GetParentInfoFor(const wui::ControlDef& c);
     HWND EnsureControlCreated(int index);
     void EnsureTabPageContainers(int tabIndex);
@@ -731,13 +744,6 @@ namespace
 
 namespace
 {
-    struct ZOrderNodeData
-    {
-        int  controlIndex{ -1 };
-        int  tabPage{ -1 };
-        bool isPageNode{ false };
-    };
-
     bool IsContainerControl(const wui::ControlDef& c)
     {
         return c.isContainer || wui::is_container_type(c.type);
