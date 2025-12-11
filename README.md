@@ -1,5 +1,5 @@
-Win32UIEditor
-==============
+Win32UIEditor v0.3.0 (2025-12-11)
+=================================
 
 Classic Win32 form editor implemented in C++23 with a module-based core.
 
@@ -10,7 +10,9 @@ Features
 - Design surface: drag controls around with the mouse, arrow keys to nudge.
 - Property panel: edit X/Y/W/H/Text/ID for the selected control.
 - Standard tab navigation across property fields and click-to-select controls on the design surface.
-- Toolbox via menu: insert Static, Button, Edit, Checkbox, Radio, GroupBox, ListBox, ComboBox, Progress, Slider.
+- Toolbox via menu: insert Static, Button, Edit, Checkbox, Radio, GroupBox, ListBox, ComboBox, Progress, Slider, Tab, ListView, Tooltip.
+- Parenting: drag controls onto container widgets or individual tab pages to nest them while preserving parent-relative coordinates.
+- Interaction patterns: draw new controls with click-and-drag rectangles, reorder siblings via Raise/Lower z-order actions, and snap to tab pages while switching between them.
 - Export to clipboard: generates C++ `CreateWindowExW` code and an `enum class ControlId`.
 
 Building with CMake + MSVC (recommended)
