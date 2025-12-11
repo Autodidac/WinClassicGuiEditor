@@ -243,6 +243,16 @@ namespace win32_ui_editor::importparser::detail
                 bump();
                 return ctx.getVar(v);
             }
+            if (cur().text == "+")
+            {
+                bump();
+                return parsePrimary();
+            }
+            if (cur().text == "-")
+            {
+                bump();
+                return -parsePrimary();
+            }
             if (cur().text == "(")
             {
                 bump();
