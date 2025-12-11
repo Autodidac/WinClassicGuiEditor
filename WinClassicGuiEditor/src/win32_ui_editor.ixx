@@ -166,6 +166,25 @@ namespace
         SetWindowTextW(h, s.c_str());
     }
 
+    POINT PhysicalScreenToLogical(HWND hwnd, POINT screenPt)
+    {
+        POINT logicalPt = screenPt;
+        if (!hwnd)
+            return logicalPt;
+
+        if (!PhysicalToLogicalPointForPerMonitorDPI(hwnd, &logicalPt))
+        {
+            const UINT dpi = GetDpiForWindow(hwnd);
+            if (dpi)
+            {
+                logicalPt.x = MulDiv(screenPt.x, USER_DEFAULT_SCREEN_DPI, dpi);
+                logicalPt.y = MulDiv(screenPt.y, USER_DEFAULT_SCREEN_DPI, dpi);
+            }
+        }
+
+        return logicalPt;
+    }
+
     void set_edit_int(HWND h, int value)
     {
         set_window_text_w(h, to_wstring(value));
@@ -1173,6 +1192,8 @@ namespace
             {
                 ClientToScreen(hwnd, &pt);
             }
+
+            pt = PhysicalScreenToLogical(g_hDesign, pt);
 
             ShowArrangeContextMenu(pt);
             return 0;
@@ -2286,7 +2307,8 @@ namespace
         AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_BACKWARD, L"Move Backward");
         AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_SEND_BACK, L"Send to Back");
 
-        TrackPopupMenu(hMenu, TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN, screenPt.x, screenPt.y, 0, g_hMain, nullptr);
+        constexpr UINT kMenuFlags = TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN | TPM_RC_ANCHOR;
+        TrackPopupMenuEx(hMenu, kMenuFlags, screenPt.x, screenPt.y, g_hDesign ? g_hDesign : g_hMain, nullptr);
         DestroyMenu(hMenu);
     }
 
@@ -2716,6 +2738,8 @@ namespace
                 MapWindowPoints(hwnd, HWND_DESKTOP, &pt, 1);
             }
 
+            pt = PhysicalScreenToLogical(g_hDesign, pt);
+
             ShowArrangeContextMenu(pt);
             return 0;
         }
@@ -2997,6 +3021,8 @@ namespace
 export int RunWin32UIEditor(HINSTANCE hInst, HINSTANCE, PWSTR, int nCmdShow)
 {
     g_hInst = hInst;
+
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
 
     WNDCLASSW wc{};
     wc.style = CS_HREDRAW | CS_VREDRAW;
