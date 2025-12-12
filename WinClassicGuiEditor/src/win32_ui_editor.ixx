@@ -968,6 +968,83 @@ namespace
     }
 }
 
+// Replace this:
+// for (int root : roots)
+//     insertControl(insertControl, root, nullptr);
+
+// With this workaround for MSVC's E3133 lambda recursion bug:
+//struct InsertControlHelper
+//{
+//    static void insert(
+//        const std::function<void(int, HTREEITEM)>& self,
+//        int idx, HTREEITEM hParent)
+//    {
+//        TVINSERTSTRUCTW tvis{};
+//        tvis.hParent = hParent ? hParent : TVI_ROOT;
+//        tvis.hInsertAfter = TVI_LAST;
+//        wstring label = ZOrderLabelForControl(CurrentControls()[idx], idx);
+//        tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+//        tvis.item.pszText = label.data();
+//        tvis.item.lParam = addNodeData(idx, -1, false);
+//        HTREEITEM hItem = TreeView_InsertItem(g_hZOrderTree, &tvis);
+//        g_zTreeItems[idx] = hItem;
+//
+//        if (CurrentControls()[idx].type == wui::ControlType::Tab)
+//        {
+//            auto tabIt = tabPageChildren.find(idx);
+//            if (tabIt != tabPageChildren.end())
+//            {
+//                const auto& pages = TabPagesFor(CurrentControls()[idx]);
+//                const size_t pageCount = std::max<size_t>(1, pages.size());
+//                for (size_t pi = 0; pi < pageCount; ++pi)
+//                {
+//                    auto childrenIt = tabIt->second.find(static_cast<int>(pi));
+//                    if (childrenIt == tabIt->second.end())
+//                        continue;
+//
+//                    const wstring pageName = (pi < pages.size()) ? pages[pi] : std::format(L"Page {}", pi + 1);
+//                    wstring pageLabel = std::format(L"Page {}: {}", pi, pageName);
+//                    TVINSERTSTRUCTW pageTvis{};
+//                    pageTvis.hParent = hItem;
+//                    pageTvis.hInsertAfter = TVI_LAST;
+//                    pageTvis.item.mask = TVIF_TEXT | TVIF_PARAM;
+//                    pageTvis.item.pszText = pageLabel.data();
+//                    pageTvis.item.lParam = addNodeData(idx, static_cast<int>(pi), true);
+//                    HTREEITEM hPage = TreeView_InsertItem(g_hZOrderTree, &pageTvis);
+//
+//                    for (int child : childrenIt->second)
+//                        self(child, hPage);
+//
+//                    TreeView_Expand(g_hZOrderTree, hPage, TVE_EXPAND);
+//                }
+//            }
+//        }
+//        else
+//        {
+//            for (int child : children[idx])
+//                self(child, hItem);
+//        }
+//
+//        if (IsContainerControl(CurrentControls()[idx]) && hItem)
+//            TreeView_Expand(g_hZOrderTree, hItem, TVE_EXPAND);
+//    }
+//};
+//
+//std::function<void(int, HTREEITEM)> insertControlFn;
+//insertControlFn = [&](int idx, HTREEITEM hParent)
+//    {
+//        InsertControlHelper::insert(insertControlFn, idx, hParent);
+//    };
+//
+//for (int root : roots)
+//insertControlFn(root, nullptr);
+//
+//g_inZTreeUpdate = false;
+//SyncZOrderSelection();
+//    }
+//}
+
+
 // -----------------------------------------------------------------------------
 // HIERARCHY TREE
 // -----------------------------------------------------------------------------
