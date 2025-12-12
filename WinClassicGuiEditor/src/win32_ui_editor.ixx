@@ -113,7 +113,12 @@ namespace editor
 
     DragState g_drag{};
 
-    struct ParentPickResult;
+    struct ParentPickResult
+    {
+        int parentIndex{ -1 };
+        int tabPageId{ -1 };
+    };
+
 
     struct CreationState
     {
@@ -912,7 +917,7 @@ namespace
                 tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                 tvis.item.pszText = label.data();
                 tvis.item.lParam = addNodeData(idx, -1, false);
-                HTREEITEM hItem = TreeView_InsertItemW(g_hZOrderTree, &tvis);
+                HTREEITEM hItem = TreeView_InsertItem(g_hZOrderTree, &tvis);
                 g_zTreeItems[idx] = hItem;
 
                 if (CurrentControls()[idx].type == wui::ControlType::Tab)
@@ -936,7 +941,7 @@ namespace
                             pageTvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                             pageTvis.item.pszText = pageLabel.data();
                             pageTvis.item.lParam = addNodeData(idx, static_cast<int>(pi), true);
-                            HTREEITEM hPage = TreeView_InsertItemW(g_hZOrderTree, &pageTvis);
+                            HTREEITEM hPage = TreeView_InsertItem(g_hZOrderTree, &pageTvis);
 
                             for (int child : childrenIt->second)
                                 self(self, child, hPage);
@@ -1025,7 +1030,7 @@ namespace
                 tvis.item.mask = TVIF_TEXT | TVIF_PARAM;
                 tvis.item.pszText = label.data();
                 tvis.item.lParam = idx;
-                HTREEITEM hItem = TreeView_InsertItemW(g_hHierarchyTree, &tvis);
+                HTREEITEM hItem = TreeView_InsertItem(g_hHierarchyTree, &tvis);
                 g_treeItems[idx] = hItem;
 
                 if (IsContainerControl(CurrentControls()[idx]) && hItem)
@@ -2026,12 +2031,6 @@ namespace
         SendToBack,
         MoveForward,
         MoveBackward,
-    };
-
-    struct ParentPickResult
-    {
-        int parentIndex{ -1 };
-        int tabPageId{ -1 };
     };
 
     bool IsDescendant(int possibleParent, int child)
