@@ -59,12 +59,12 @@ namespace win32_ui_editor::importparser::detail
                 break;
 
             case SLASH:
-                if (c == '/' && n != '*')
+                if (c == '/')
                 {
                     state = LINE;
                     ++i;
                 }
-                else if (c == '*' && n != '/')
+                else if (c == '*')
                 {
                     state = BLOCK;
                     ++i;
