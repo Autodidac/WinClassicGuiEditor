@@ -33,10 +33,12 @@ HWND hProgress = CreateWindowExW(0, PROGRESS_CLASS, L"", WS_CHILD | WS_VISIBLE,
     10, 220, 120, 30, hwndParent, (HMENU)404, hInst, nullptr);
 HWND hSlider = CreateWindowExW(0, L"msctls_trackbar", L"", WS_CHILD | WS_VISIBLE,
     10, 260, 120, 30, hwndParent, (HMENU)505, hInst, nullptr);
+HWND hCustomClass = CreateWindowExW(0, L"MyButtonClass", L"Custom", WS_CHILD | WS_VISIBLE,
+    10, 300, 120, 30, hwndParent, (HMENU)606, hInst, nullptr);
     )";
 
     auto controls = parse_controls_from_code(code);
-    assert(controls.size() == 7);
+    assert(controls.size() == 8);
 
     assert(controls[0].className == L"STATIC");
     assert(controls[0].text == L"Wide Label");
@@ -58,6 +60,16 @@ HWND hSlider = CreateWindowExW(0, L"msctls_trackbar", L"", WS_CHILD | WS_VISIBLE
     assert(controls[6].className == L"msctls_trackbar");
     assert(controls[6].type == ControlType::Slider);
     assert(controls[6].id == 505);
+    assert(controls[7].className == L"MyButtonClass");
+    assert(controls[7].text == L"Custom");
+    assert(controls[7].id == 606);
+
+    assert(win32_ui_editor::model::ExportClassName(controls[7]) == L"MyButtonClass");
+
+    win32_ui_editor::model::ControlDef nativeControl{};
+    nativeControl.type = ControlType::Button;
+    assert(nativeControl.className.empty());
+    assert(win32_ui_editor::model::ExportClassName(nativeControl) == L"BUTTON");
 
     return 0;
 }

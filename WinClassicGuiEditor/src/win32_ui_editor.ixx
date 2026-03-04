@@ -2273,7 +2273,7 @@ namespace win32_ui_editor
                     ? c.styleExpr
                     : wui::default_style_expr(c.type);
 
-                const std::wstring className = wui::DefaultClassName(c.type);
+                const std::wstring className = wui::ExportClassName(c);
                 const std::wstring escapedClass = escape_wstring_literal(className);
                 const std::wstring escapedText = escape_wstring_literal(c.text);
 
