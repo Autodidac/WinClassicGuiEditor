@@ -38,19 +38,47 @@ namespace win32_ui_editor::importparser::detail
         string out;
         out.reserve(input.size());
 
-        enum { NORMAL, SLASH, LINE, BLOCK } state = NORMAL;
+        enum class LexState
+        {
+            Normal,
+            LineComment,
+            BlockComment,
+            StringLiteral,
+            CharLiteral
+        };
+
+        LexState state = LexState::Normal;
+        bool escaping = false;
 
         for (size_t i = 0; i < input.size(); ++i)
         {
             char c = input[i];
-            char n = (i + 1 < input.size() ? input[i + 1] : 0);
+            char n = (i + 1 < input.size() ? input[i + 1] : '\0');
 
             switch (state)
             {
-            case NORMAL:
-                if (c == '/')
+            case LexState::Normal:
+                if (c == '/' && n == '/')
                 {
-                    state = SLASH;
+                    state = LexState::LineComment;
+                    ++i;
+                }
+                else if (c == '/' && n == '*')
+                {
+                    state = LexState::BlockComment;
+                    ++i;
+                }
+                else if (c == '"')
+                {
+                    out.push_back(c);
+                    state = LexState::StringLiteral;
+                    escaping = false;
+                }
+                else if (c == '\'')
+                {
+                    out.push_back(c);
+                    state = LexState::CharLiteral;
+                    escaping = false;
                 }
                 else
                 {
@@ -58,38 +86,55 @@ namespace win32_ui_editor::importparser::detail
                 }
                 break;
 
-            case SLASH:
-                if (c == '/')
-                {
-                    state = LINE;
-                    ++i;
-                }
-                else if (c == '*')
-                {
-                    state = BLOCK;
-                    ++i;
-                }
-                else
-                {
-                    out.push_back('/');
-                    out.push_back(c);
-                    state = NORMAL;
-                }
-                break;
-
-            case LINE:
+            case LexState::LineComment:
                 if (c == '\n')
                 {
                     out.push_back('\n');
-                    state = NORMAL;
+                    state = LexState::Normal;
                 }
                 break;
 
-            case BLOCK:
-                if (c == '*' && n == '/')
+            case LexState::BlockComment:
+                if (c == '\n')
                 {
-                    state = NORMAL;
+                    out.push_back('\n');
+                }
+                else if (c == '*' && n == '/')
+                {
+                    state = LexState::Normal;
                     ++i;
+                }
+                break;
+
+            case LexState::StringLiteral:
+                out.push_back(c);
+                if (escaping)
+                {
+                    escaping = false;
+                }
+                else if (c == '\\')
+                {
+                    escaping = true;
+                }
+                else if (c == '"')
+                {
+                    state = LexState::Normal;
+                }
+                break;
+
+            case LexState::CharLiteral:
+                out.push_back(c);
+                if (escaping)
+                {
+                    escaping = false;
+                }
+                else if (c == '\\')
+                {
+                    escaping = true;
+                }
+                else if (c == '\'')
+                {
+                    state = LexState::Normal;
                 }
                 break;
             }
