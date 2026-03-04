@@ -108,6 +108,16 @@ export namespace win32_ui_editor::model
     }
 
     // ------------------------------------------------------------
+    // Export class token (preserve imported/custom class names)
+    // ------------------------------------------------------------
+    export inline wstring ExportClassName(const ControlDef& c)
+    {
+        if (!c.className.empty())
+            return c.className;
+        return DefaultClassName(c.type);
+    }
+
+    // ------------------------------------------------------------
     // Default style expressions for new controls
     // ------------------------------------------------------------
     export inline wstring default_style_expr(ControlType t)
