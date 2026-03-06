@@ -82,6 +82,13 @@ namespace win32_ui_editor
             RECT  previewRect{};
         };
 
+        struct PendingDragState
+        {
+            bool  armed{ false };
+            int   controlIndex{ -1 };
+            POINT startPt{};
+        };
+
         struct ParentInfo
         {
             HWND hwnd{};
@@ -144,6 +151,7 @@ namespace win32_ui_editor
             // Interaction
             DragState     drag{};
             CreationState create{};
+            PendingDragState pendingDrag{};
             bool          drawToCreateMode{ true };
 
             // Debounce
@@ -160,6 +168,7 @@ namespace win32_ui_editor
         constexpr int   kPropPanelWidth = 320;
         constexpr int   kHandleSize = 6;
         constexpr int   kGridSize = 4;
+        constexpr int   kDragStartThreshold = 4;
         constexpr DWORD kPropPanelDebounceMs = 60;
 
         // ----------------------------
@@ -251,6 +260,9 @@ namespace win32_ui_editor
         std::array<RECT, 8> BuildHandleRects(const RECT& rc);
         DragHandle HitTestHandles(const POINT& pt, const RECT& rc);
         bool  BeginDrag(const POINT& designPt);
+        void  ClearPendingDrag();
+        void  ArmPendingDrag(int controlIndex, const POINT& designPt);
+        bool  TryBeginPendingDrag(const POINT& designPt, WPARAM keys);
         void  UpdateDrag(const POINT& designPt);
         void  EndDrag();
         void  RedrawDesignOverlay();
@@ -805,6 +817,56 @@ namespace win32_ui_editor
             g.drag.previewRect = rc;
 
             SetCapture(g.hDesign);
+            return true;
+        }
+
+        void ClearPendingDrag()
+        {
+            g.pendingDrag = {};
+        }
+
+        void ArmPendingDrag(int controlIndex, const POINT& designPt)
+        {
+            if (controlIndex < 0 || controlIndex >= (int)CurrentControls().size())
+            {
+                ClearPendingDrag();
+                return;
+            }
+
+            g.pendingDrag.armed = true;
+            g.pendingDrag.controlIndex = controlIndex;
+            g.pendingDrag.startPt = designPt;
+        }
+
+        bool TryBeginPendingDrag(const POINT& designPt, WPARAM keys)
+        {
+            if (!g.pendingDrag.armed)
+                return false;
+
+            if (!(keys & MK_LBUTTON))
+                return false;
+
+            const int dx = std::abs(designPt.x - g.pendingDrag.startPt.x);
+            const int dy = std::abs(designPt.y - g.pendingDrag.startPt.y);
+            if (dx < kDragStartThreshold && dy < kDragStartThreshold)
+                return false;
+
+            int dragIndex = g.pendingDrag.controlIndex;
+            if (dragIndex < 0 || dragIndex >= (int)CurrentControls().size())
+            {
+                ClearPendingDrag();
+                return false;
+            }
+
+            if (g.selectedIndex != dragIndex)
+                SetSelectedIndex(dragIndex);
+
+            bool started = BeginDrag(g.pendingDrag.startPt);
+            ClearPendingDrag();
+            if (!started)
+                return false;
+
+            UpdateDrag(designPt);
             return true;
         }
 
@@ -1393,6 +1455,7 @@ namespace win32_ui_editor
             if (g.drag.active)
                 EndDrag();
 
+            ClearPendingDrag();
             g.selectedIndex = idx;
             InvalidateRect(g.hDesign, nullptr, TRUE);
             RefreshPropertyPanel();
@@ -1426,9 +1489,8 @@ namespace win32_ui_editor
                             return 0;
 
                         SetSelectedIndex(i);
-                        if (BeginDrag(designPt))
-                            return 0;
-                        break;
+                        ArmPendingDrag(i, designPt);
+                        return 0;
                     }
                 }
                 break;
@@ -1436,18 +1498,21 @@ namespace win32_ui_editor
 
             case WM_MOUSEMOVE:
             {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT designPt = ClientToDesign(hwnd, pt);
+
                 if (g.create.drawing)
                 {
-                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-                    UpdateCreateDrag(ClientToDesign(hwnd, pt));
+                    UpdateCreateDrag(designPt);
                     return 0;
                 }
                 if (g.drag.active)
                 {
-                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
-                    UpdateDrag(ClientToDesign(hwnd, pt));
+                    UpdateDrag(designPt);
                     return 0;
                 }
+                if (TryBeginPendingDrag(designPt, wp))
+                    return 0;
                 break;
             }
 
@@ -1455,6 +1520,7 @@ namespace win32_ui_editor
             {
                 if (g.create.drawing) { EndCreateDrag(); return 0; }
                 if (g.drag.active) { EndDrag();      return 0; }
+                ClearPendingDrag();
                 break;
             }
 
@@ -1836,6 +1902,7 @@ namespace win32_ui_editor
             if (!g.create.pending)
                 return false;
 
+            ClearPendingDrag();
             g.create.drawing = true;
             g.create.startPt = designPt;
             UpdateCreatePreview(designPt);
@@ -2790,28 +2857,30 @@ namespace win32_ui_editor
             {
                 POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                 if (BeginCreateDrag(pt)) return 0;
-                if (BeginDrag(pt))       return 0;
 
                 int hit = HitTestTopmostControl(pt);
                 SetSelectedIndex(hit);
+                ArmPendingDrag(hit, pt);
                 RedrawDesignOverlay();
                 return 0;
             }
 
             case WM_MOUSEMOVE:
             {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+
                 if (g.create.drawing)
                 {
-                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                     UpdateCreateDrag(pt);
                     return 0;
                 }
                 if (g.drag.active)
                 {
-                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
                     UpdateDrag(pt);
                     return 0;
                 }
+                if (TryBeginPendingDrag(pt, wp))
+                    return 0;
                 break;
             }
 
@@ -2819,6 +2888,7 @@ namespace win32_ui_editor
             {
                 if (g.create.drawing) { EndCreateDrag(); return 0; }
                 if (g.drag.active) { EndDrag();      return 0; }
+                ClearPendingDrag();
                 break;
             }
 
