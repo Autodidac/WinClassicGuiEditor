@@ -2038,7 +2038,7 @@ namespace win32_ui_editor
             case wui::ControlType::Button:   return SIZE{ 80, 24 };
             case wui::ControlType::Edit:     return SIZE{ 120, 24 };
             case wui::ControlType::Static:   return SIZE{ 100, 20 };
-            case wui::ControlType::CheckBox: return SIZE{ 100, 20 };
+            case wui::ControlType::Checkbox: return SIZE{ 100, 20 };
             case wui::ControlType::Radio:    return SIZE{ 100, 20 };
             case wui::ControlType::GroupBox: return SIZE{ 160, 100 };
             case wui::ControlType::ListBox:  return SIZE{ 140, 90 };
