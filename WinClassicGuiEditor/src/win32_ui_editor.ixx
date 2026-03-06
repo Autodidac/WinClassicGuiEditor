@@ -236,6 +236,7 @@ namespace win32_ui_editor
         wstring get_window_text_w(HWND h);
         void    set_window_text_w(HWND h, const wstring& s);
         POINT   PhysicalScreenToLogical(HWND hwnd, POINT screenPt);
+        POINT   LogicalClientToPhysicalScreen(HWND hwnd, POINT clientPt);
         void    set_edit_int(HWND h, int value);
         int     parse_int_or(const wstring& s, int fallback);
 
@@ -380,6 +381,26 @@ namespace win32_ui_editor
                 }
             }
             return logicalPt;
+        }
+
+        POINT LogicalClientToPhysicalScreen(HWND hwnd, POINT clientPt)
+        {
+            POINT physicalClient = clientPt;
+            if (!hwnd)
+                return physicalClient;
+
+            if (!LogicalToPhysicalPointForPerMonitorDPI(hwnd, &physicalClient))
+            {
+                const UINT dpi = GetDpiForWindow(hwnd);
+                if (dpi)
+                {
+                    physicalClient.x = MulDiv(clientPt.x, dpi, USER_DEFAULT_SCREEN_DPI);
+                    physicalClient.y = MulDiv(clientPt.y, dpi, USER_DEFAULT_SCREEN_DPI);
+                }
+            }
+
+            MapWindowPoints(hwnd, HWND_DESKTOP, &physicalClient, 1);
+            return physicalClient;
         }
 
         void set_edit_int(HWND h, int value)
@@ -755,14 +776,148 @@ namespace win32_ui_editor
             return true;
         }
 
+        HWND ActiveTabPageContainer(int tabIndex)
+        {
+            auto it = g.tabPageContainers.find(tabIndex);
+            if (it == g.tabPageContainers.end() || it->second.empty())
+                return nullptr;
+
+            if ((size_t)tabIndex >= g.hwndControls.size())
+                return nullptr;
+
+            HWND hTab = g.hwndControls[tabIndex];
+            if (!hTab)
+                return nullptr;
+
+            int sel = TabCtrl_GetCurSel(hTab);
+            if (sel < 0) sel = 0;
+            if (sel >= (int)it->second.size())
+                sel = (int)it->second.size() - 1;
+
+            return it->second[(size_t)sel];
+        }
+
+        bool IsControlAllowedByActiveContainers(int index)
+        {
+            if (!IsOnActiveTabPage(index))
+                return false;
+
+            int child = index;
+            int parent = CurrentControls()[child].parentIndex;
+            while (parent >= 0 && parent < (int)CurrentControls().size())
+            {
+                if (CurrentControls()[parent].type == wui::ControlType::Tab)
+                {
+                    HWND hActivePage = ActiveTabPageContainer(parent);
+                    if (hActivePage && !IsWindowVisible(hActivePage))
+                        return false;
+                }
+
+                child = parent;
+                parent = CurrentControls()[child].parentIndex;
+            }
+            return true;
+        }
+
+        HWND HitTestLiveWindow(const POINT& designPt)
+        {
+            if (!g.hDesign)
+                return nullptr;
+
+            constexpr UINT kFlags = CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT;
+
+            POINT screenPt = LogicalClientToPhysicalScreen(g.hDesign, designPt);
+            HWND hHit = WindowFromPoint(screenPt);
+
+            if (!hHit || (hHit != g.hDesign && !IsChild(g.hDesign, hHit)))
+            {
+                POINT clientPt = designPt;
+                hHit = ChildWindowFromPointEx(g.hDesign, clientPt, kFlags);
+            }
+
+            if (!hHit)
+                return nullptr;
+
+            HWND cursor = hHit;
+            while (cursor)
+            {
+                POINT ptClient = screenPt;
+                MapWindowPoints(HWND_DESKTOP, cursor, &ptClient, 1);
+
+                HWND child = ChildWindowFromPointEx(cursor, ptClient, kFlags);
+                if (!child || child == cursor)
+                    break;
+
+                cursor = child;
+            }
+
+            return cursor;
+        }
+
+        int FindControlIndexFromLiveHitHwnd(HWND hwnd)
+        {
+            for (HWND cursor = hwnd; cursor; cursor = GetParent(cursor))
+            {
+                int idx = FindControlIndexFromHwnd(cursor);
+                if (idx >= 0)
+                    return idx;
+                if (cursor == g.hDesign)
+                    break;
+            }
+            return -1;
+        }
+
+        bool IsLiveHitInsideControl(int controlIndex, HWND hitHwnd)
+        {
+            if (controlIndex < 0 || controlIndex >= (int)g.hwndControls.size())
+                return false;
+
+            HWND hControl = g.hwndControls[controlIndex];
+            if (!hControl)
+                return false;
+
+            if (!(hitHwnd == hControl || IsChild(hControl, hitHwnd)))
+                return false;
+
+            const auto& def = CurrentControls()[controlIndex];
+
+            HWND expectedParent = g.hDesign;
+            if (def.parentIndex >= 0 && def.parentIndex < (int)CurrentControls().size())
+            {
+                const auto& parent = CurrentControls()[def.parentIndex];
+                if (parent.type == wui::ControlType::Tab)
+                    expectedParent = ActiveTabPageContainer(def.parentIndex);
+                else if ((size_t)def.parentIndex < g.hwndControls.size())
+                    expectedParent = g.hwndControls[def.parentIndex];
+            }
+
+            if (!expectedParent)
+                expectedParent = g.hDesign;
+
+            return GetParent(hControl) == expectedParent;
+        }
+
         int HitTestTopmostControl(const POINT& designPt)
         {
+            HWND hLiveHit = HitTestLiveWindow(designPt);
+            if (hLiveHit)
+            {
+                int liveIndex = FindControlIndexFromLiveHitHwnd(hLiveHit);
+                if (liveIndex >= 0 &&
+                    IsControlAllowedByActiveContainers(liveIndex) &&
+                    IsLiveHitInsideControl(liveIndex, hLiveHit))
+                {
+                    return liveIndex;
+                }
+                return -1;
+            }
+
             for (int i = (int)CurrentControls().size() - 1; i >= 0; --i)
             {
                 const auto& c = CurrentControls()[i];
                 if (!PtInRect(&c.rect, designPt))
                     continue;
-                if (!IsOnActiveTabPage(i))
+                if (!IsControlAllowedByActiveContainers(i))
                     continue;
                 return i;
             }
