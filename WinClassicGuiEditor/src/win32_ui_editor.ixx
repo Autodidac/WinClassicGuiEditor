@@ -2890,7 +2890,7 @@ namespace win32_ui_editor
             if (g.hZOrderTree)
                 g.originalZTreeProc = (WNDPROC)SetWindowLongPtrW(g.hZOrderTree, GWLP_WNDPROC, (LONG_PTR)ZOrderTreeProc);
 
-            const int btnWidth = (kPropPanelWidth - 24) / 2;
+            const int btnWidth = (kPropPanelWidth - kDesignMargin * 3) / 2;
             int btnY = g.zListTop + 208;
 
             g.hZBringFront = CreateWindowExW(0, L"BUTTON", L"Bring to Front", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, btnY, btnWidth, 24, g.hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_BRING_FRONT, g.hInst, nullptr);
