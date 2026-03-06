@@ -2324,6 +2324,7 @@ namespace win32_ui_editor
             {
                 RebuildRuntimeControls();
                 RebuildHierarchyTree();
+                // Keep z-order tree rebuild to a single pass in this fallback path.
                 RebuildZOrderTree();
                 RefreshPropertyPanel();
                 RedrawDesignOverlay();
