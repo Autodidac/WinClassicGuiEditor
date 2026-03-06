@@ -76,6 +76,7 @@ namespace win32_ui_editor
         {
             bool pending{ false };
             bool drawing{ false };
+            bool metMinExtent{ false };
             wui::ControlType type{};
             ParentPickResult parentChoice{};
             POINT startPt{};
@@ -169,6 +170,7 @@ namespace win32_ui_editor
         constexpr int   kHandleSize = 6;
         constexpr int   kGridSize = 4;
         constexpr int   kDragStartThreshold = 4;
+        constexpr int   kCreateMinExtent = 8;
         constexpr DWORD kPropPanelDebounceMs = 60;
 
         // ----------------------------
@@ -1874,6 +1876,24 @@ namespace win32_ui_editor
             return rc;
         }
 
+        SIZE DefaultCreateSizeForType(wui::ControlType type)
+        {
+            switch (type)
+            {
+            case wui::ControlType::Button:   return SIZE{ 80, 24 };
+            case wui::ControlType::Edit:     return SIZE{ 120, 24 };
+            case wui::ControlType::Static:   return SIZE{ 100, 20 };
+            case wui::ControlType::CheckBox: return SIZE{ 100, 20 };
+            case wui::ControlType::Radio:    return SIZE{ 100, 20 };
+            case wui::ControlType::GroupBox: return SIZE{ 160, 100 };
+            case wui::ControlType::ListBox:  return SIZE{ 140, 90 };
+            case wui::ControlType::ComboBox: return SIZE{ 140, 120 };
+            case wui::ControlType::ListView: return SIZE{ 200, 120 };
+            case wui::ControlType::Tab:      return SIZE{ 220, 140 };
+            default:                         return SIZE{ 100, 24 };
+            }
+        }
+
         void StartPendingCreation(wui::ControlType type, const ParentPickResult& parentChoice)
         {
             g.create = {};
@@ -1887,6 +1907,10 @@ namespace win32_ui_editor
         {
             if (!g.create.drawing)
                 return;
+
+            const int dx = std::abs(current.x - g.create.startPt.x);
+            const int dy = std::abs(current.y - g.create.startPt.y);
+            g.create.metMinExtent = (dx >= kCreateMinExtent || dy >= kCreateMinExtent);
 
             RECT rc = NormalizeRect(g.create.startPt, current);
             rc.left = SnapToGrid(rc.left);
@@ -1904,6 +1928,7 @@ namespace win32_ui_editor
 
             ClearPendingDrag();
             g.create.drawing = true;
+            g.create.metMinExtent = false;
             g.create.startPt = designPt;
             UpdateCreatePreview(designPt);
             SetCapture(g.hDesign);
@@ -1930,9 +1955,24 @@ namespace win32_ui_editor
             const RECT finalRect = g.create.previewRect;
             const auto type = g.create.type;
             const auto parentChoice = g.create.parentChoice;
+            const POINT startPt = g.create.startPt;
+            const bool metMinExtent = g.create.metMinExtent;
 
             g.create = {};
             ReleaseCapture();
+
+            if (!metMinExtent)
+            {
+                const SIZE defSize = DefaultCreateSizeForType(type);
+                RECT centered{};
+                centered.left = startPt.x - (defSize.cx / 2);
+                centered.top = startPt.y - (defSize.cy / 2);
+                centered.right = centered.left + defSize.cx;
+                centered.bottom = centered.top + defSize.cy;
+                CreateControlWithRect(type, centered, parentChoice);
+                return;
+            }
+
             CreateControlWithRect(type, finalRect, parentChoice);
         }
 
