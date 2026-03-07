@@ -828,7 +828,7 @@ namespace win32_ui_editor
             if (!g.hDesign)
                 return nullptr;
 
-            constexpr UINT kFlags = CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT;
+            constexpr UINT kFlags = CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT;
 
             POINT screenPt = LogicalClientToPhysicalScreen(g.hDesign, designPt);
             HWND hHit = WindowFromPoint(screenPt);
@@ -1638,6 +1638,7 @@ namespace win32_ui_editor
             switch (msg)
             {
             case WM_LBUTTONDOWN:
+            case WM_LBUTTONDBLCLK:
             {
                 for (int i = 0; i < (int)g.hwndControls.size(); ++i)
                 {
@@ -1651,6 +1652,7 @@ namespace win32_ui_editor
 
                         SetSelectedIndex(i);
                         ArmPendingDrag(i, designPt);
+                        SetCapture(hwnd);
                         return 0;
                     }
                 }
@@ -1681,8 +1683,10 @@ namespace win32_ui_editor
             {
                 if (g.create.drawing) { EndCreateDrag(); return 0; }
                 if (g.drag.active) { EndDrag();      return 0; }
+                if (GetCapture() == hwnd)
+                    ReleaseCapture();
                 ClearPendingDrag();
-                break;
+                return 0;
             }
 
             case WM_CONTEXTMENU:
@@ -1764,15 +1768,6 @@ namespace win32_ui_editor
             if (style_contains_flag(expr, L"CBS_DROPDOWNLIST")) style |= CBS_DROPDOWNLIST;
             if (style_contains_flag(expr, L"TBS_AUTOTICKS"))    style |= TBS_AUTOTICKS;
             if (style_contains_flag(expr, L"LVS_REPORT"))       style |= LVS_REPORT;
-
-            // editor preview semantics
-            if (c.type == wui::ControlType::Button ||
-                c.type == wui::ControlType::Checkbox ||
-                c.type == wui::ControlType::Radio ||
-                c.type == wui::ControlType::GroupBox)
-            {
-                style |= WS_DISABLED;
-            }
 
             style |= WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
             return style;
