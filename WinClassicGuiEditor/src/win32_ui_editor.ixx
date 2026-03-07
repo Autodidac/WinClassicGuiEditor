@@ -2944,7 +2944,7 @@ namespace win32_ui_editor
             RECT rc{};
             GetClientRect(hwnd, &rc);
             const int minDesignWidth = 160;
-            const int maxPanelWidth = std::max(kMinPropPanelWidth, rc.right - 2 * kDesignMargin - minDesignWidth);
+            const int maxPanelWidth = std::max<int>(kMinPropPanelWidth, rc.right - 2 * kDesignMargin - minDesignWidth);
             int proposed = rc.right - x;
             g.propPanelWidth = std::clamp(proposed, kMinPropPanelWidth, maxPanelWidth);
             g.splitterAnchorX = x;
@@ -3074,7 +3074,7 @@ namespace win32_ui_editor
             const int listTop = g.zListTop;
             const int minListHeight = 80;
             const int minTreeHeight = 80;
-            const int listWidth = std::max(100, (rc.right - rc.left) - margin * 2);
+            const int listWidth = std::max<int>(100, (rc.right - rc.left) - margin * 2);
 
             int treeHeight = std::max(minTreeHeight, listTop - treeTop - buttonHeight - buttonSpacing - margin);
             if (g.hHierarchyTree)
@@ -3119,7 +3119,7 @@ namespace win32_ui_editor
 
             const int contentTop = toolbarHeight;
             const int minDesignWidth = 160;
-            const int maxPanelWidth = std::max(kMinPropPanelWidth, rcClient.right - 2 * kDesignMargin - minDesignWidth);
+            const int maxPanelWidth = std::max<int>(kMinPropPanelWidth, rcClient.right - 2 * kDesignMargin - minDesignWidth);
             g.propPanelWidth = std::clamp(g.propPanelWidth, kMinPropPanelWidth, maxPanelWidth);
             const int propW = g.propPanelWidth;
             const int designRight = rcClient.right - propW;
