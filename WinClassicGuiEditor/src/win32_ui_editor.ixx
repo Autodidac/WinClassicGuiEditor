@@ -3321,7 +3321,7 @@ namespace win32_ui_editor
 
                 g.hDesign = CreateWindowExW(
                     WS_EX_CLIENTEDGE, L"STATIC", nullptr,
-                    WS_CHILD | WS_VISIBLE,
+                    WS_CHILD | WS_VISIBLE | SS_NOTIFY,
                     kDesignMargin, kDesignMargin, 400, 400,
                     hwnd, nullptr, g.hInst, nullptr);
 
