@@ -126,6 +126,10 @@ namespace win32_ui_editor
             // Layout anchors (panel)
             int  zListTop{ 0 };
             int  treeTop{ 0 };
+            int  propPanelWidth{ 320 };
+            bool draggingSplitter{ false };
+            int  splitterAnchorX{ 0 };
+            float zoom{ 1.0f };
 
             // Update guards
             bool inZTreeUpdate{ false };
@@ -166,12 +170,17 @@ namespace win32_ui_editor
         // ----------------------------
 
         constexpr int   kDesignMargin = 8;
-        constexpr int   kPropPanelWidth = 320;
+        constexpr int   kDefaultPropPanelWidth = 320;
+        constexpr int   kMinPropPanelWidth = 220;
+        constexpr int   kSplitterHitRadius = 4;
         constexpr int   kHandleSize = 6;
         constexpr int   kGridSize = 4;
         constexpr int   kDragStartThreshold = 4;
         constexpr int   kCreateMinExtent = 8;
         constexpr DWORD kPropPanelDebounceMs = 60;
+        constexpr float kMinZoom = 0.25f;
+        constexpr float kMaxZoom = 4.0f;
+        constexpr float kZoomStep = 1.10f;
 
         constexpr wchar_t kMainWindowClass[] = L"WIN32_UI_EDITOR";
         constexpr wchar_t kPropertyPanelClass[] = L"WIN32_UI_PROP_PANEL";
@@ -217,6 +226,10 @@ namespace win32_ui_editor
             IDM_ADD_SLIDER,
             IDM_ADD_TAB,
 
+            IDM_VIEW_ZOOM_IN,
+            IDM_VIEW_ZOOM_OUT,
+            IDM_VIEW_ZOOM_RESET,
+
             IDM_ARRANGE_BRING_FRONT,
             IDM_ARRANGE_SEND_BACK,
             IDM_ARRANGE_FORWARD,
@@ -260,6 +273,10 @@ namespace win32_ui_editor
         // design + dragging
         POINT ScreenToDesign(POINT pt);
         POINT ClientToDesign(HWND from, POINT pt);
+        POINT ModelToClient(const POINT& pt);
+        POINT ClientToModel(const POINT& pt);
+        int   ModelToClientLen(int value);
+        int   ClientToModelLen(int value);
         RECT  SelectedRect();
         int   SnapToGrid(int value);
         RECT  ClampToDesignSurface(const RECT& rc);
@@ -273,6 +290,7 @@ namespace win32_ui_editor
         void  EndDrag();
         void  RedrawDesignOverlay();
         RECT  ModelRectToClient(const RECT& rc);
+        RECT  ClientRectToModel(const RECT& rc);
         void  DrawSelectionOverlay(HDC hdc);
         void  DrawCreationOverlay(HDC hdc);
 
@@ -336,6 +354,15 @@ namespace win32_ui_editor
         void BuildMenus(HWND hwnd);
         void BuildToolbar(HWND hwnd);
         void UpdatePlacementModeUI();
+        void SetZoom(float zoom);
+        void ZoomIn();
+        void ZoomOut();
+        void ZoomReset();
+        int  SplitterX(HWND hwnd);
+        bool IsOnSplitter(HWND hwnd, int x);
+        void BeginSplitterDrag(HWND hwnd, int x);
+        void UpdateSplitterDrag(HWND hwnd, int x);
+        void EndSplitterDrag();
         void CreatePropertyPanel(HWND hwnd);
         void LayoutZOrderPanel();
         void LayoutChildren(HWND hwnd);
@@ -524,16 +551,42 @@ namespace win32_ui_editor
         // COORDINATE HELPERS
         // ---------------------------------------------------------------------
 
+        int ModelToClientLen(int value)
+        {
+            return (int)std::lround(value * g.zoom);
+        }
+
+        int ClientToModelLen(int value)
+        {
+            return (int)std::lround(value / g.zoom);
+        }
+
+        POINT ModelToClient(const POINT& pt)
+        {
+            POINT out{};
+            out.x = ModelToClientLen(pt.x);
+            out.y = ModelToClientLen(pt.y);
+            return out;
+        }
+
+        POINT ClientToModel(const POINT& pt)
+        {
+            POINT out{};
+            out.x = ClientToModelLen(pt.x);
+            out.y = ClientToModelLen(pt.y);
+            return out;
+        }
+
         POINT ScreenToDesign(POINT pt)
         {
             MapWindowPoints(HWND_DESKTOP, g.hDesign, &pt, 1);
-            return pt;
+            return ClientToModel(pt);
         }
 
         POINT ClientToDesign(HWND from, POINT pt)
         {
             MapWindowPoints(from, g.hDesign, &pt, 1);
-            return pt;
+            return ClientToModel(pt);
         }
 
         RECT SelectedRect()
@@ -554,8 +607,9 @@ namespace win32_ui_editor
 
         RECT ClampToDesignSurface(const RECT& rc)
         {
-            RECT bounds{};
-            GetClientRect(g.hDesign, &bounds);
+            RECT boundsClient{};
+            GetClientRect(g.hDesign, &boundsClient);
+            RECT bounds = ClientRectToModel(boundsClient);
 
             RECT out = rc;
             const int minW = 4;
@@ -626,8 +680,22 @@ namespace win32_ui_editor
 
         RECT ModelRectToClient(const RECT& rc)
         {
-            // Stored in design coords already (future-proof hook for scroll/zoom).
-            return rc;
+            RECT out{};
+            out.left = ModelToClientLen(rc.left);
+            out.top = ModelToClientLen(rc.top);
+            out.right = ModelToClientLen(rc.right);
+            out.bottom = ModelToClientLen(rc.bottom);
+            return out;
+        }
+
+        RECT ClientRectToModel(const RECT& rc)
+        {
+            RECT out{};
+            out.left = ClientToModelLen(rc.left);
+            out.top = ClientToModelLen(rc.top);
+            out.right = ClientToModelLen(rc.right);
+            out.bottom = ClientToModelLen(rc.bottom);
+            return out;
         }
 
         void RedrawDesignOverlay()
@@ -830,12 +898,13 @@ namespace win32_ui_editor
 
             constexpr UINT kFlags = CWP_SKIPINVISIBLE | CWP_SKIPTRANSPARENT;
 
-            POINT screenPt = LogicalClientToPhysicalScreen(g.hDesign, designPt);
+            POINT clientPtDesign = ModelToClient(designPt);
+            POINT screenPt = LogicalClientToPhysicalScreen(g.hDesign, clientPtDesign);
             HWND hHit = WindowFromPoint(screenPt);
 
             if (!hHit || (hHit != g.hDesign && !IsChild(g.hDesign, hHit)))
             {
-                POINT clientPt = designPt;
+                POINT clientPt = clientPtDesign;
                 hHit = ChildWindowFromPointEx(g.hDesign, clientPt, kFlags);
             }
 
@@ -946,11 +1015,11 @@ namespace win32_ui_editor
                 if (h)
                 {
                     ParentInfo pinfo = GetParentInfoFor(c);
-                    const int w = c.rect.right - c.rect.left;
-                    const int hgt = c.rect.bottom - c.rect.top;
-                    const int relX = c.rect.left - pinfo.rect.left;
-                    const int relY = c.rect.top - pinfo.rect.top;
-                    MoveWindow(h, relX, relY, w, hgt, TRUE);
+                    const int w = ModelToClientLen(c.rect.right - c.rect.left);
+                    const int hgt = ModelToClientLen(c.rect.bottom - c.rect.top);
+                    const int relX = ModelToClientLen(c.rect.left - pinfo.rect.left);
+                    const int relY = ModelToClientLen(c.rect.top - pinfo.rect.top);
+                    MoveWindow(h, relX, relY, std::max(w, 4), std::max(hgt, 4), TRUE);
 
                     if (c.type == wui::ControlType::Tab)
                         EnsureTabPageContainers(index);
@@ -1224,11 +1293,11 @@ namespace win32_ui_editor
                 if (h)
                 {
                     ParentInfo pinfo = GetParentInfoFor(c);
-                    const int w = c.rect.right - c.rect.left;
-                    const int hgt = c.rect.bottom - c.rect.top;
-                    const int relX = c.rect.left - pinfo.rect.left;
-                    const int relY = c.rect.top - pinfo.rect.top;
-                    MoveWindow(h, relX, relY, w, hgt, TRUE);
+                    const int w = ModelToClientLen(c.rect.right - c.rect.left);
+                    const int hgt = ModelToClientLen(c.rect.bottom - c.rect.top);
+                    const int relX = ModelToClientLen(c.rect.left - pinfo.rect.left);
+                    const int relY = ModelToClientLen(c.rect.top - pinfo.rect.top);
+                    MoveWindow(h, relX, relY, std::max(w, 4), std::max(hgt, 4), TRUE);
 
                     if (idx == PropIndex::Text)
                         set_window_text_w(h, c.text);
@@ -1792,11 +1861,11 @@ namespace win32_ui_editor
 
             const int absX = c.rect.left;
             const int absY = c.rect.top;
-            const int absW = c.rect.right - c.rect.left;
-            const int absH = c.rect.bottom - c.rect.top;
+            const int absW = ModelToClientLen(c.rect.right - c.rect.left);
+            const int absH = ModelToClientLen(c.rect.bottom - c.rect.top);
 
-            const int relX = absX - parentRect.left;
-            const int relY = absY - parentRect.top;
+            const int relX = ModelToClientLen(absX - parentRect.left);
+            const int relY = ModelToClientLen(absY - parentRect.top);
 
             wstring cls = wui::DefaultClassName(c.type);
             DWORD style = BuildStyleFlags(c);
@@ -1849,14 +1918,19 @@ namespace win32_ui_editor
 
         RECT TabPageRectInDesignCoords(const wui::ControlDef& tabDef, HWND hTab)
         {
-            RECT rc{ 0, 0, tabDef.rect.right - tabDef.rect.left, tabDef.rect.bottom - tabDef.rect.top };
-            TabCtrl_AdjustRect(hTab, FALSE, &rc);
+            RECT rcClient{
+                0,
+                0,
+                ModelToClientLen(tabDef.rect.right - tabDef.rect.left),
+                ModelToClientLen(tabDef.rect.bottom - tabDef.rect.top)
+            };
+            TabCtrl_AdjustRect(hTab, FALSE, &rcClient);
 
             RECT pageRect{};
-            pageRect.left = tabDef.rect.left + rc.left;
-            pageRect.top = tabDef.rect.top + rc.top;
-            pageRect.right = pageRect.left + std::max<LONG>(rc.right - rc.left, 4);
-            pageRect.bottom = pageRect.top + std::max<LONG>(rc.bottom - rc.top, 4);
+            pageRect.left = tabDef.rect.left + ClientToModelLen(rcClient.left);
+            pageRect.top = tabDef.rect.top + ClientToModelLen(rcClient.top);
+            pageRect.right = pageRect.left + std::max(ClientToModelLen(rcClient.right - rcClient.left), 4);
+            pageRect.bottom = pageRect.top + std::max(ClientToModelLen(rcClient.bottom - rcClient.top), 4);
             return pageRect;
         }
 
@@ -1878,8 +1952,10 @@ namespace win32_ui_editor
             auto& containers = g.tabPageContainers[tabIndex];
 
             RECT pageRectDesign = TabPageRectInDesignCoords(tabDef, hTab);
-            const int pageW = pageRectDesign.right - pageRectDesign.left;
-            const int pageH = pageRectDesign.bottom - pageRectDesign.top;
+            const int pageW = ModelToClientLen(pageRectDesign.right - pageRectDesign.left);
+            const int pageH = ModelToClientLen(pageRectDesign.bottom - pageRectDesign.top);
+            const int pageRelX = ModelToClientLen(pageRectDesign.left - tabDef.rect.left);
+            const int pageRelY = ModelToClientLen(pageRectDesign.top - tabDef.rect.top);
 
             if (containers.size() > pageCount)
             {
@@ -1901,8 +1977,8 @@ namespace win32_ui_editor
                     hPage = CreateWindowExW(
                         0, L"STATIC", nullptr,
                         WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
-                        pageRectDesign.left - tabDef.rect.left,
-                        pageRectDesign.top - tabDef.rect.top,
+                        pageRelX,
+                        pageRelY,
                         pageW, pageH,
                         hTab, nullptr, g.hInst, nullptr);
                     containers[i] = hPage;
@@ -1910,8 +1986,8 @@ namespace win32_ui_editor
 
                 MoveWindow(
                     hPage,
-                    pageRectDesign.left - tabDef.rect.left,
-                    pageRectDesign.top - tabDef.rect.top,
+                    pageRelX,
+                    pageRelY,
                     pageW,
                     pageH,
                     TRUE);
@@ -2733,6 +2809,7 @@ namespace win32_ui_editor
             HMENU hFile = CreateMenu();
             HMENU hInsert = CreateMenu();
             HMENU hArrange = CreateMenu();
+            HMENU hView = CreateMenu();
 
             AppendMenuW(hFile, MF_STRING, IDM_NEW, L"&New");
             AppendMenuW(hFile, MF_STRING, IDM_EXPORT, L"E&xport to Clipboard");
@@ -2753,13 +2830,19 @@ namespace win32_ui_editor
             AppendMenuW(hInsert, MF_STRING, IDM_ADD_SLIDER, L"Slider");
             AppendMenuW(hInsert, MF_STRING, IDM_ADD_TAB, L"Tab Control");
 
-            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
-            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hInsert, L"&Insert");
             AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_BRING_FRONT, L"Bring to &Front");
             AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_FORWARD, L"Move &Forward");
             AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_BACKWARD, L"Move &Backward");
             AppendMenuW(hArrange, MF_STRING, IDM_ARRANGE_SEND_BACK, L"Send to &Back");
+
+            AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_IN, L"Zoom &In	Ctrl++");
+            AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_OUT, L"Zoom &Out	Ctrl+-");
+            AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, L"Zoom &Reset	Ctrl+0");
+
+            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
+            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hInsert, L"&Insert");
             AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
+            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hView, L"&View");
 
             SetMenu(hwnd, hMenuBar);
             g.hInsertMenu = hInsert;
@@ -2780,14 +2863,35 @@ namespace win32_ui_editor
             SendMessageW(g.hToolbar, TB_SETEXTENDEDSTYLE, 0, TBSTYLE_EX_MIXEDBUTTONS);
             SendMessageW(g.hToolbar, TB_SETBUTTONSIZE, 0, MAKELONG(90, 24));
 
-            int strId = (int)SendMessageW(g.hToolbar, TB_ADDSTRING, 0, (LPARAM)L"Draw to create");
-            TBBUTTON btn{};
-            btn.iBitmap = I_IMAGENONE;
-            btn.idCommand = IDM_TOGGLE_DRAW_MODE;
-            btn.fsState = TBSTATE_ENABLED | (g.drawToCreateMode ? TBSTATE_CHECKED : 0);
-            btn.fsStyle = BTNS_CHECK | BTNS_AUTOSIZE | BTNS_SHOWTEXT;
-            btn.iString = strId;
-            SendMessageW(g.hToolbar, TB_ADDBUTTONS, 1, (LPARAM)&btn);
+            int base = (int)SendMessageW(g.hToolbar, TB_ADDSTRING, 0, (LPARAM)L"Draw to create\0Zoom +\0Zoom -\0Zoom 1:1\0\0");
+            TBBUTTON btns[5]{};
+            btns[0].iBitmap = I_IMAGENONE;
+            btns[0].idCommand = IDM_TOGGLE_DRAW_MODE;
+            btns[0].fsState = TBSTATE_ENABLED | (g.drawToCreateMode ? TBSTATE_CHECKED : 0);
+            btns[0].fsStyle = BTNS_CHECK | BTNS_AUTOSIZE | BTNS_SHOWTEXT;
+            btns[0].iString = base;
+
+            btns[1].fsStyle = BTNS_SEP;
+
+            btns[2].iBitmap = I_IMAGENONE;
+            btns[2].idCommand = IDM_VIEW_ZOOM_IN;
+            btns[2].fsState = TBSTATE_ENABLED;
+            btns[2].fsStyle = BTNS_AUTOSIZE | BTNS_SHOWTEXT;
+            btns[2].iString = base + 1;
+
+            btns[3].iBitmap = I_IMAGENONE;
+            btns[3].idCommand = IDM_VIEW_ZOOM_OUT;
+            btns[3].fsState = TBSTATE_ENABLED;
+            btns[3].fsStyle = BTNS_AUTOSIZE | BTNS_SHOWTEXT;
+            btns[3].iString = base + 2;
+
+            btns[4].iBitmap = I_IMAGENONE;
+            btns[4].idCommand = IDM_VIEW_ZOOM_RESET;
+            btns[4].fsState = TBSTATE_ENABLED;
+            btns[4].fsStyle = BTNS_AUTOSIZE | BTNS_SHOWTEXT;
+            btns[4].iString = base + 3;
+
+            SendMessageW(g.hToolbar, TB_ADDBUTTONS, (WPARAM)std::size(btns), (LPARAM)btns);
             SendMessageW(g.hToolbar, TB_AUTOSIZE, 0, 0);
             ShowWindow(g.hToolbar, SW_SHOW);
         }
@@ -2803,12 +2907,63 @@ namespace win32_ui_editor
                     MAKELONG(g.drawToCreateMode ? TRUE : FALSE, 0));
         }
 
+        int SplitterX(HWND hwnd)
+        {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            return rc.right - g.propPanelWidth;
+        }
+
+        bool IsOnSplitter(HWND hwnd, int x)
+        {
+            const int splitter = SplitterX(hwnd);
+            return x >= splitter - kSplitterHitRadius && x <= splitter + kSplitterHitRadius;
+        }
+
+        void SetZoom(float zoom)
+        {
+            g.zoom = std::clamp(zoom, kMinZoom, kMaxZoom);
+            RebuildRuntimeControls();
+            RefreshPropertyPanel();
+            RedrawDesignOverlay();
+        }
+
+        void ZoomIn() { SetZoom(g.zoom * kZoomStep); }
+        void ZoomOut() { SetZoom(g.zoom / kZoomStep); }
+        void ZoomReset() { SetZoom(1.0f); }
+
+        void BeginSplitterDrag(HWND hwnd, int x)
+        {
+            g.draggingSplitter = true;
+            g.splitterAnchorX = x;
+            SetCapture(hwnd);
+        }
+
+        void UpdateSplitterDrag(HWND hwnd, int x)
+        {
+            RECT rc{};
+            GetClientRect(hwnd, &rc);
+            const int minDesignWidth = 160;
+            const int maxPanelWidth = std::max(kMinPropPanelWidth, rc.right - 2 * kDesignMargin - minDesignWidth);
+            int proposed = rc.right - x;
+            g.propPanelWidth = std::clamp(proposed, kMinPropPanelWidth, maxPanelWidth);
+            g.splitterAnchorX = x;
+            LayoutChildren(hwnd);
+        }
+
+        void EndSplitterDrag()
+        {
+            g.draggingSplitter = false;
+            if (GetCapture() == g.hMain)
+                ReleaseCapture();
+        }
+
         void CreatePropertyPanel(HWND hwnd)
         {
             g.hPropPanel = CreateWindowExW(
                 WS_EX_CLIENTEDGE, kPropertyPanelClass, nullptr,
                 WS_CHILD | WS_VISIBLE,
-                0, 0, kPropPanelWidth, 0,
+                0, 0, g.propPanelWidth, 0,
                 hwnd, nullptr, g.hInst, nullptr);
 
             const wchar_t* labels[] = { L"X:", L"Y:", L"W:", L"H:", L"Text:", L"ID:" };
@@ -2825,7 +2980,7 @@ namespace win32_ui_editor
                 g.hPropEdits[i] = CreateWindowExW(
                     WS_EX_CLIENTEDGE, L"EDIT", L"",
                     WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                    52, y, kPropPanelWidth - 60, 22,
+                    52, y, g.propPanelWidth - 60, 22,
                     g.hPropPanel, (HMENU)(INT_PTR)(100 + i), g.hInst, nullptr);
 
                 y += 28;
@@ -2835,27 +2990,27 @@ namespace win32_ui_editor
             g.hStyleEdit = CreateWindowExW(
                 WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | ES_AUTOHSCROLL,
-                60, y, kPropPanelWidth - 68, 22,
+                60, y, g.propPanelWidth - 68, 22,
                 g.hPropPanel, (HMENU)(INT_PTR)200, g.hInst, nullptr);
 
             y += 28;
             CreateWindowExW(0, L"STATIC", L"Common flags:", WS_CHILD | WS_VISIBLE, 8, y + 4, 100, 20, g.hPropPanel, nullptr, g.hInst, nullptr);
 
             y += 24;
-            g.hStyleChkChild = CreateWindowExW(0, L"BUTTON", L"WS_CHILD", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, kPropPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)210, g.hInst, nullptr);
+            g.hStyleChkChild = CreateWindowExW(0, L"BUTTON", L"WS_CHILD", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, g.propPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)210, g.hInst, nullptr);
 
             y += 22;
-            g.hStyleChkVisible = CreateWindowExW(0, L"BUTTON", L"WS_VISIBLE", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, kPropPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)211, g.hInst, nullptr);
+            g.hStyleChkVisible = CreateWindowExW(0, L"BUTTON", L"WS_VISIBLE", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, g.propPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)211, g.hInst, nullptr);
 
             y += 22;
-            g.hStyleChkTabstop = CreateWindowExW(0, L"BUTTON", L"WS_TABSTOP", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, kPropPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)212, g.hInst, nullptr);
+            g.hStyleChkTabstop = CreateWindowExW(0, L"BUTTON", L"WS_TABSTOP", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, g.propPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)212, g.hInst, nullptr);
 
             y += 22;
-            g.hStyleChkBorder = CreateWindowExW(0, L"BUTTON", L"WS_BORDER", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, kPropPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)213, g.hInst, nullptr);
+            g.hStyleChkBorder = CreateWindowExW(0, L"BUTTON", L"WS_BORDER", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_AUTOCHECKBOX, 8, y, g.propPanelWidth - 16, 20, g.hPropPanel, (HMENU)(INT_PTR)213, g.hInst, nullptr);
 
             y += 28;
             g.hTabPageLabel = CreateWindowExW(0, L"STATIC", L"Tab Page:", WS_CHILD, 8, y + 4, 70, 20, g.hPropPanel, nullptr, g.hInst, nullptr);
-            g.hTabPageCombo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST, 80, y, kPropPanelWidth - 88, 200, g.hPropPanel, (HMENU)(INT_PTR)214, g.hInst, nullptr);
+            g.hTabPageCombo = CreateWindowExW(0, L"COMBOBOX", L"", WS_CHILD | WS_TABSTOP | CBS_DROPDOWNLIST, 80, y, g.propPanelWidth - 88, 200, g.hPropPanel, (HMENU)(INT_PTR)214, g.hInst, nullptr);
             ShowWindow(g.hTabPageLabel, SW_HIDE);
             ShowWindow(g.hTabPageCombo, SW_HIDE);
 
@@ -2866,14 +3021,14 @@ namespace win32_ui_editor
             g.hHierarchyTree = CreateWindowExW(
                 WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_SHOWSELALWAYS,
-                8, g.treeTop, kPropPanelWidth - 16, 180,
+                8, g.treeTop, g.propPanelWidth - 16, 180,
                 g.hPropPanel, nullptr, g.hInst, nullptr);
 
             y = g.treeTop + 188;
             g.hReparentBtn = CreateWindowExW(
                 0, L"BUTTON", L"Reparent Selection...",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP,
-                8, y, kPropPanelWidth - 16, 24,
+                8, y, g.propPanelWidth - 16, 24,
                 g.hPropPanel, (HMENU)(INT_PTR)IDC_REPARENT_BTN, g.hInst, nullptr);
 
             y += 36;
@@ -2883,13 +3038,13 @@ namespace win32_ui_editor
             g.hZOrderTree = CreateWindowExW(
                 WS_EX_CLIENTEDGE, WC_TREEVIEWW, L"",
                 WS_CHILD | WS_VISIBLE | WS_TABSTOP | TVS_HASLINES | TVS_LINESATROOT | TVS_HASBUTTONS | TVS_SHOWSELALWAYS,
-                8, g.zListTop, kPropPanelWidth - 16, 200,
+                8, g.zListTop, g.propPanelWidth - 16, 200,
                 g.hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_TREE, g.hInst, nullptr);
 
             if (g.hZOrderTree)
                 g.originalZTreeProc = (WNDPROC)SetWindowLongPtrW(g.hZOrderTree, GWLP_WNDPROC, (LONG_PTR)ZOrderTreeProc);
 
-            const int btnWidth = (kPropPanelWidth - kDesignMargin * 3) / 2;
+            const int btnWidth = (g.propPanelWidth - kDesignMargin * 3) / 2;
             int btnY = g.zListTop + 208;
 
             g.hZBringFront = CreateWindowExW(0, L"BUTTON", L"Bring to Front", WS_CHILD | WS_VISIBLE | WS_TABSTOP, 8, btnY, btnWidth, 24, g.hPropPanel, (HMENU)(INT_PTR)IDC_ZORDER_BRING_FRONT, g.hInst, nullptr);
@@ -2919,7 +3074,7 @@ namespace win32_ui_editor
             const int listTop = g.zListTop;
             const int minListHeight = 80;
             const int minTreeHeight = 80;
-            const int listWidth = kPropPanelWidth - margin * 2;
+            const int listWidth = std::max(100, (rc.right - rc.left) - margin * 2);
 
             int treeHeight = std::max(minTreeHeight, listTop - treeTop - buttonHeight - buttonSpacing - margin);
             if (g.hHierarchyTree)
@@ -2937,7 +3092,7 @@ namespace win32_ui_editor
             MoveWindow(g.hZOrderTree, margin, listTop, listWidth, listHeight, TRUE);
 
             int btnY = listTop + listHeight + buttonSpacing;
-            const int btnWidth = (kPropPanelWidth - margin * 3) / 2;
+            const int btnWidth = (g.propPanelWidth - margin * 3) / 2;
 
             MoveWindow(g.hZBringFront, margin, btnY, btnWidth, buttonHeight, TRUE);
             MoveWindow(g.hZSendBack, margin * 2 + btnWidth, btnY, btnWidth, buttonHeight, TRUE);
@@ -2962,9 +3117,12 @@ namespace win32_ui_editor
                 MoveWindow(g.hToolbar, 0, 0, rcClient.right, toolbarHeight, TRUE);
             }
 
-            const int propW = kPropPanelWidth;
-            const int designRight = rcClient.right - propW;
             const int contentTop = toolbarHeight;
+            const int minDesignWidth = 160;
+            const int maxPanelWidth = std::max(kMinPropPanelWidth, rcClient.right - 2 * kDesignMargin - minDesignWidth);
+            g.propPanelWidth = std::clamp(g.propPanelWidth, kMinPropPanelWidth, maxPanelWidth);
+            const int propW = g.propPanelWidth;
+            const int designRight = rcClient.right - propW;
 
             if (g.hDesign)
             {
@@ -3050,7 +3208,8 @@ namespace win32_ui_editor
 
             case WM_LBUTTONDOWN:
             {
-                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT ptClient{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT pt = ClientToModel(ptClient);
                 if (BeginCreateDrag(pt)) return 0;
 
                 int hit = HitTestTopmostControl(pt);
@@ -3062,7 +3221,8 @@ namespace win32_ui_editor
 
             case WM_MOUSEMOVE:
             {
-                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT ptClient{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                POINT pt = ClientToModel(ptClient);
 
                 if (g.create.drawing)
                 {
@@ -3103,8 +3263,8 @@ namespace win32_ui_editor
                 if (GET_KEYSTATE_WPARAM(wp) & MK_CONTROL)
                 {
                     const int delta = GET_WHEEL_DELTA_WPARAM(wp);
-                    if (delta > 0)      ApplyZOrderCommand(ZOrderCommand::MoveForward);
-                    else if (delta < 0) ApplyZOrderCommand(ZOrderCommand::MoveBackward);
+                    if (delta > 0)      ZoomIn();
+                    else if (delta < 0) ZoomOut();
                     return 0;
                 }
                 break;
@@ -3156,6 +3316,8 @@ namespace win32_ui_editor
                 icc.dwSize = sizeof(icc);
                 icc.dwICC = ICC_WIN95_CLASSES | ICC_BAR_CLASSES | ICC_TAB_CLASSES | ICC_LISTVIEW_CLASSES | ICC_TREEVIEW_CLASSES;
                 InitCommonControlsEx(&icc);
+                g.propPanelWidth = kDefaultPropPanelWidth;
+                g.zoom = 1.0f;
 
                 g.hDesign = CreateWindowExW(
                     WS_EX_CLIENTEDGE, L"STATIC", nullptr,
@@ -3179,6 +3341,57 @@ namespace win32_ui_editor
                 LayoutChildren(hwnd);
                 return 0;
 
+            case WM_SETCURSOR:
+            {
+                if (LOWORD(lp) == HTCLIENT)
+                {
+                    POINT pt{};
+                    GetCursorPos(&pt);
+                    ScreenToClient(hwnd, &pt);
+                    if (g.draggingSplitter || IsOnSplitter(hwnd, pt.x))
+                    {
+                        SetCursor(LoadCursorW(nullptr, IDC_SIZEWE));
+                        return TRUE;
+                    }
+                }
+                break;
+            }
+
+            case WM_LBUTTONDOWN:
+            {
+                POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                if (IsOnSplitter(hwnd, pt.x))
+                {
+                    BeginSplitterDrag(hwnd, pt.x);
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_MOUSEMOVE:
+            {
+                if (g.draggingSplitter)
+                {
+                    POINT pt{ GET_X_LPARAM(lp), GET_Y_LPARAM(lp) };
+                    UpdateSplitterDrag(hwnd, pt.x);
+                    return 0;
+                }
+                break;
+            }
+
+            case WM_LBUTTONUP:
+                if (g.draggingSplitter)
+                {
+                    EndSplitterDrag();
+                    return 0;
+                }
+                break;
+
+            case WM_CAPTURECHANGED:
+                if (g.draggingSplitter)
+                    g.draggingSplitter = false;
+                break;
+
             case WM_NOTIFY:
             {
                 auto hdr = reinterpret_cast<LPNMHDR>(lp);
@@ -3194,6 +3407,17 @@ namespace win32_ui_editor
                         RestackAndRefreshSelection();
                     }
                     return 0;
+                }
+                break;
+            }
+
+            case WM_KEYDOWN:
+            {
+                if (GetKeyState(VK_CONTROL) & 0x8000)
+                {
+                    if (wp == VK_OEM_PLUS || wp == VK_ADD) { ZoomIn(); return 0; }
+                    if (wp == VK_OEM_MINUS || wp == VK_SUBTRACT) { ZoomOut(); return 0; }
+                    if (wp == '0' || wp == VK_NUMPAD0) { ZoomReset(); return 0; }
                 }
                 break;
             }
@@ -3323,6 +3547,10 @@ namespace win32_ui_editor
                 case IDM_ADD_PROGRESS: AddControl(wui::ControlType::Progress); return 0;
                 case IDM_ADD_SLIDER:   AddControl(wui::ControlType::Slider);   return 0;
                 case IDM_ADD_TAB:      AddControl(wui::ControlType::Tab);      return 0;
+
+                case IDM_VIEW_ZOOM_IN:    ZoomIn();    return 0;
+                case IDM_VIEW_ZOOM_OUT:   ZoomOut();   return 0;
+                case IDM_VIEW_ZOOM_RESET: ZoomReset(); return 0;
 
                 case IDM_ARRANGE_BRING_FRONT: ApplyZOrderCommand(ZOrderCommand::BringToFront); return 0;
                 case IDM_ARRANGE_SEND_BACK:   ApplyZOrderCommand(ZOrderCommand::SendToBack);   return 0;
