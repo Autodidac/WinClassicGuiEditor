@@ -173,6 +173,9 @@ namespace win32_ui_editor
         constexpr int   kCreateMinExtent = 8;
         constexpr DWORD kPropPanelDebounceMs = 60;
 
+        constexpr wchar_t kMainWindowClass[] = L"WIN32_UI_EDITOR";
+        constexpr wchar_t kPropertyPanelClass[] = L"WIN32_UI_PROP_PANEL";
+
         // ----------------------------
         // IDs
         // ----------------------------
@@ -343,6 +346,7 @@ namespace win32_ui_editor
 
         LRESULT CALLBACK ZOrderTreeProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
         LRESULT CALLBACK DesignWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
+        LRESULT CALLBACK PropertyPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
         LRESULT CALLBACK MainWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp);
 
         // ---------------------------------------------------------------------
@@ -2807,7 +2811,7 @@ namespace win32_ui_editor
         void CreatePropertyPanel(HWND hwnd)
         {
             g.hPropPanel = CreateWindowExW(
-                WS_EX_CLIENTEDGE, L"STATIC", nullptr,
+                WS_EX_CLIENTEDGE, kPropertyPanelClass, nullptr,
                 WS_CHILD | WS_VISIBLE,
                 0, 0, kPropPanelWidth, 0,
                 hwnd, nullptr, g.hInst, nullptr);
@@ -3131,6 +3135,18 @@ namespace win32_ui_editor
             return DefWindowProcW(hwnd, msg, wp, lp);
         }
 
+
+        // ---------------------------------------------------------------------
+        // PROPERTY PANEL PROC
+        // ---------------------------------------------------------------------
+
+        LRESULT CALLBACK PropertyPanelWndProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp)
+        {
+            if ((msg == WM_COMMAND || msg == WM_NOTIFY) && g.hMain)
+                return SendMessageW(g.hMain, msg, wp, lp);
+            return DefWindowProcW(hwnd, msg, wp, lp);
+        }
+
         // ---------------------------------------------------------------------
         // MAIN WINDOW PROC
         // ---------------------------------------------------------------------
@@ -3351,13 +3367,25 @@ namespace win32_ui_editor
         wc.hInstance = hInst;
         wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
         wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
-        wc.lpszClassName = L"WIN32_UI_EDITOR";
+        wc.lpszClassName = kMainWindowClass;
 
         if (!RegisterClassW(&wc))
             return 0;
 
+
+        WNDCLASSW propPanelClass{};
+        propPanelClass.style = CS_HREDRAW | CS_VREDRAW;
+        propPanelClass.lpfnWndProc = editor::PropertyPanelWndProc;
+        propPanelClass.hInstance = hInst;
+        propPanelClass.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+        propPanelClass.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+        propPanelClass.lpszClassName = kPropertyPanelClass;
+
+        if (!RegisterClassW(&propPanelClass) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS)
+            return 0;
+
         g.hMain = CreateWindowExW(
-            0, L"WIN32_UI_EDITOR", L"Win32 UI Editor",
+            0, kMainWindowClass, L"Win32 UI Editor",
             WS_OVERLAPPEDWINDOW | WS_VISIBLE,
             CW_USEDEFAULT, CW_USEDEFAULT, 1200, 750,
             nullptr, nullptr, hInst, nullptr);
