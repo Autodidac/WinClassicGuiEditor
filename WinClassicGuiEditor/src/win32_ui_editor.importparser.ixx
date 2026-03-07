@@ -440,6 +440,14 @@ namespace win32_ui_editor::importparser::detail
         return s;
     }
 
+    wstring trim_copy(wstring s)
+    {
+        auto notSpace = [](wchar_t ch) { return !std::iswspace(ch); };
+        s.erase(s.begin(), std::find_if(s.begin(), s.end(), notSpace));
+        s.erase(std::find_if(s.rbegin(), s.rend(), notSpace).base(), s.end());
+        return s;
+    }
+
     vector<wstring> split_tab_labels(const string& labels)
     {
         vector<wstring> pages;
@@ -454,6 +462,26 @@ namespace win32_ui_editor::importparser::detail
             if (!part.empty())
                 pages.emplace_back(part.begin(), part.end());
             if (bar == string::npos)
+                break;
+            start = bar + 1;
+        }
+        return pages;
+    }
+
+    vector<wstring> split_tab_labels(const wstring& labels)
+    {
+        vector<wstring> pages;
+        size_t start = 0;
+        while (start < labels.size())
+        {
+            size_t bar = labels.find(L'|', start);
+            wstring part = (bar == wstring::npos)
+                ? labels.substr(start)
+                : labels.substr(start, bar - start);
+            part = trim_copy(part);
+            if (!part.empty())
+                pages.emplace_back(std::move(part));
+            if (bar == wstring::npos)
                 break;
             start = bar + 1;
         }
@@ -877,7 +905,7 @@ namespace win32_ui_editor::importparser::detail
                 if (it != tabItems.end())
                     c.tabPages = it->second;
                 else if (!c.text.empty())
-                    c.tabPages = split_tab_labels(std::string(c.text.begin(), c.text.end()));
+                    c.tabPages = split_tab_labels(c.text);
 
                 if (c.tabPages.empty())
                     c.tabPages = { L"Page 1", L"Page 2" };
