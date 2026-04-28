@@ -729,11 +729,17 @@ namespace win32_ui_editor::importparser::detail
 
                 // Extract class name
                 auto stripStringPrefix = [](const string& literal) -> string {
-                    if (literal.starts_with("u8\"") || literal.starts_with("u8'"))
-                        return literal.substr(2);
-
                     if (literal.empty())
                         return literal;
+
+                    if (literal.starts_with("u8"))
+                    {
+                        size_t pos = 2;
+                        while (pos < literal.size() && std::isspace(static_cast<unsigned char>(literal[pos])))
+                            ++pos;
+                        if (pos < literal.size() && (literal[pos] == '"' || literal[pos] == '\''))
+                            return literal.substr(pos);
+                    }
 
                     const bool hasWidePrefix =
                         (literal.front() == 'L' || literal.front() == 'u' || literal.front() == 'U');

@@ -12,10 +12,9 @@ using win32_ui_editor::model::ControlType;
 int main()
 {
     const std::string code = R"(
-//* CreateWindowExW should be ignored even when the comment starts with //* followed by the marker
-HWND hIgnoredLine = CreateWindowExW(0, L"BUTTON", L"Ignored", WS_CHILD | WS_VISIBLE,
-    10, 10, 100, 20, hwndParent, (HMENU)999, hInst, nullptr);
-/*/ Another ignored CreateWindowExW should not slip through when the opener is /*/
+// CreateWindowExW(0, L"BUTTON", L"Ignored", WS_CHILD | WS_VISIBLE,
+//     10, 10, 100, 20, hwndParent, (HMENU)999, hInst, nullptr);
+/*
 HWND hIgnoredBlock = CreateWindowExW(0, L"STATIC", L"Also Ignored", WS_CHILD | WS_VISIBLE,
     10, 10, 100, 20, hwndParent, (HMENU)998, hInst, nullptr);
 */

@@ -209,6 +209,8 @@ namespace win32_ui_editor
         enum : UINT
         {
             IDM_NEW = 1,
+            IDM_DELETE,
+            IDM_DUPLICATE,
             IDM_EXPORT,
             IDM_EXPORT_FILE,
             IDM_IMPORT,
@@ -340,11 +342,16 @@ namespace win32_ui_editor
         bool  ApplyParentChoice(int childIdx, const ParentPickResult& choice);
         int   CreateControlWithRect(wui::ControlType type, RECT rc, const ParentPickResult& parentChoice);
         void  AddControl(wui::ControlType type);
+        void  DeleteSelection();
+        void  DuplicateSelection();
+        bool  HandleEditorKeyDown(WPARAM key);
         void  ShowArrangeContextMenu(POINT screenPt);
 
         // export/import
         wstring sanitize_identifier(const wstring& s);
         wstring escape_wstring_literal(const wstring& s);
+        wstring export_class_expr(const wui::ControlDef& c);
+        wstring export_text_expr(const wui::ControlDef& c);
         wstring BuildExportText();
         void    ExportLayoutToClipboard();
         void    ExportLayoutToFile();
@@ -1775,6 +1782,10 @@ namespace win32_ui_editor
 
             case WM_CLOSE:
                 return 0; // embedded children must not close in editor
+
+            case WM_KEYDOWN:
+                if (HandleEditorKeyDown(wp))
+                    return 0;
             }
 
             return CallWindowProcW(orig, hwnd, msg, wp, lp);
@@ -1823,10 +1834,11 @@ namespace win32_ui_editor
 
         DWORD BuildStyleFlags(const wui::ControlDef& c)
         {
-            DWORD style = WS_CHILD | WS_VISIBLE;
+            DWORD style = WS_CHILD;
 
             const wstring& expr = c.styleExpr;
 
+            if (style_contains_flag(expr, L"WS_VISIBLE"))      style |= WS_VISIBLE;
             if (style_contains_flag(expr, L"WS_TABSTOP"))      style |= WS_TABSTOP;
             if (style_contains_flag(expr, L"ES_AUTOHSCROLL"))  style |= ES_AUTOHSCROLL;
             if (style_contains_flag(expr, L"WS_BORDER"))       style |= WS_BORDER;
@@ -2430,6 +2442,160 @@ namespace win32_ui_editor
             CreateControlWithRect(type, rc, parentChoice);
         }
 
+        int NextAvailableControlId()
+        {
+            int nextId = 1000;
+            std::unordered_set<int> used;
+            for (const auto& c : CurrentControls())
+            {
+                used.insert(c.id);
+                nextId = std::max(nextId, c.id + 1);
+            }
+
+            while (used.contains(nextId))
+                ++nextId;
+            return nextId;
+        }
+
+        void DeleteSelection()
+        {
+            const int selected = g.selectedIndex;
+            const int count = (int)CurrentControls().size();
+            if (selected < 0 || selected >= count)
+                return;
+
+            std::vector<bool> remove((size_t)count, false);
+            remove[(size_t)selected] = true;
+
+            bool changed = true;
+            while (changed)
+            {
+                changed = false;
+                for (int i = 0; i < count; ++i)
+                {
+                    const int parent = CurrentControls()[i].parentIndex;
+                    if (!remove[(size_t)i] && parent >= 0 && parent < count && remove[(size_t)parent])
+                    {
+                        remove[(size_t)i] = true;
+                        changed = true;
+                    }
+                }
+            }
+
+            std::vector<int> oldToNew((size_t)count, -1);
+            vector<wui::ControlDef> kept;
+            kept.reserve(CurrentControls().size());
+            for (int i = 0; i < count; ++i)
+            {
+                if (remove[(size_t)i])
+                    continue;
+                oldToNew[(size_t)i] = (int)kept.size();
+                kept.push_back(CurrentControls()[i]);
+            }
+
+            for (auto& c : kept)
+            {
+                if (c.parentIndex >= 0 && c.parentIndex < count)
+                    c.parentIndex = oldToNew[(size_t)c.parentIndex];
+                if (c.parentIndex < 0)
+                    c.tabPageId = -1;
+            }
+
+            CurrentControls() = std::move(kept);
+            g.selectedIndex = std::min(selected, (int)CurrentControls().size() - 1);
+
+            RebuildRuntimeControls();
+            RebuildHierarchyTree();
+            RebuildZOrderTree();
+            RefreshPropertyPanel();
+            RedrawDesignOverlay();
+        }
+
+        void DuplicateSelection()
+        {
+            const int selected = g.selectedIndex;
+            if (selected < 0 || selected >= (int)CurrentControls().size())
+                return;
+
+            wui::ControlDef copy = CurrentControls()[selected];
+            OffsetRect(&copy.rect, kGridSize * 2, kGridSize * 2);
+            copy.rect = ClampToDesignSurface(copy.rect);
+            copy.id = NextAvailableControlId();
+            if (!copy.idName.empty())
+                copy.idName.clear();
+
+            CurrentControls().push_back(std::move(copy));
+            g.selectedIndex = (int)CurrentControls().size() - 1;
+
+            RebuildRuntimeControls();
+            RebuildHierarchyTree();
+            RebuildZOrderTree();
+            RefreshPropertyPanel();
+            RedrawDesignOverlay();
+        }
+
+        bool NudgeSelection(WPARAM key, bool resize, int step)
+        {
+            if (g.selectedIndex < 0 || g.selectedIndex >= (int)CurrentControls().size())
+                return false;
+
+            RECT rc = CurrentControls()[g.selectedIndex].rect;
+            int dx = 0;
+            int dy = 0;
+            switch (key)
+            {
+            case VK_LEFT:  dx = -step; break;
+            case VK_RIGHT: dx = step;  break;
+            case VK_UP:    dy = -step; break;
+            case VK_DOWN:  dy = step;  break;
+            default: return false;
+            }
+
+            if (resize)
+            {
+                rc.right += dx;
+                rc.bottom += dy;
+                if (rc.right - rc.left < 4) rc.right = rc.left + 4;
+                if (rc.bottom - rc.top < 4) rc.bottom = rc.top + 4;
+            }
+            else
+            {
+                OffsetRect(&rc, dx, dy);
+            }
+
+            rc = ClampToDesignSurface(rc);
+            ApplyRectToControl(g.selectedIndex, rc);
+            RefreshPropertyPanelDebounced(true);
+            RedrawDesignOverlay();
+            return true;
+        }
+
+        bool HandleEditorKeyDown(WPARAM key)
+        {
+            const bool ctrl = (GetKeyState(VK_CONTROL) & 0x8000) != 0;
+            const bool shift = (GetKeyState(VK_SHIFT) & 0x8000) != 0;
+
+            if (key == VK_DELETE || key == VK_BACK)
+            {
+                DeleteSelection();
+                return true;
+            }
+
+            if (ctrl && key == 'D')
+            {
+                DuplicateSelection();
+                return true;
+            }
+
+            if (key == VK_LEFT || key == VK_RIGHT || key == VK_UP || key == VK_DOWN)
+            {
+                const int step = ctrl ? 1 : kGridSize;
+                return NudgeSelection(key, shift, step);
+            }
+
+            return false;
+        }
+
         void ApplyZOrderCommand(ZOrderCommand cmd)
         {
             if (g.selectedIndex < 0 || CurrentControls().empty())
@@ -2518,9 +2684,12 @@ namespace win32_ui_editor
             AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
             AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_BACKWARD, L"Move Backward");
             AppendMenuW(hMenu, MF_STRING | (canBack ? MF_ENABLED : MF_GRAYED), IDM_ARRANGE_SEND_BACK, L"Send to Back");
+            AppendMenuW(hMenu, MF_SEPARATOR, 0, nullptr);
+            AppendMenuW(hMenu, MF_STRING | (hasSel ? MF_ENABLED : MF_GRAYED), IDM_DUPLICATE, L"Duplicate");
+            AppendMenuW(hMenu, MF_STRING | (hasSel ? MF_ENABLED : MF_GRAYED), IDM_DELETE, L"Delete");
 
             constexpr UINT kMenuFlags = TPM_RIGHTBUTTON | TPM_TOPALIGN | TPM_LEFTALIGN | TPM_RC_ANCHOR;
-            TrackPopupMenuEx(hMenu, kMenuFlags, screenPt.x, screenPt.y, g.hDesign ? g.hDesign : g.hMain, nullptr);
+            TrackPopupMenuEx(hMenu, kMenuFlags, screenPt.x, screenPt.y, g.hMain ? g.hMain : g.hDesign, nullptr);
             DestroyMenu(hMenu);
         }
 
@@ -2564,12 +2733,68 @@ namespace win32_ui_editor
             return out;
         }
 
+        bool is_plain_identifier(const wstring& s)
+        {
+            if (s.empty())
+                return false;
+            if (!(std::iswalpha(s.front()) || s.front() == L'_'))
+                return false;
+            for (wchar_t ch : s)
+                if (!(std::iswalnum(ch) || ch == L'_'))
+                    return false;
+            return true;
+        }
+
+        wstring export_class_expr(const wui::ControlDef& c)
+        {
+            const std::wstring className = wui::ExportClassName(c);
+            if (className.starts_with(L"WC_") ||
+                className.ends_with(L"_CLASS") ||
+                className.ends_with(L"_CLASSW") ||
+                className.ends_with(L"_CLASSA") ||
+                className == L"PROGRESS_CLASS" ||
+                className == L"PROGRESS_CLASSW" ||
+                className == L"TRACKBAR_CLASS" ||
+                className == L"TRACKBAR_CLASSW" ||
+                className == L"TOOLTIPS_CLASS")
+            {
+                if (is_plain_identifier(className))
+                    return className;
+            }
+
+            return L"L\"" + escape_wstring_literal(className) + L"\"";
+        }
+
+        wstring export_text_expr(const wui::ControlDef& c)
+        {
+            if (c.text == L"nullptr" || c.text == L"NULL")
+                return c.text;
+            return L"L\"" + escape_wstring_literal(c.text) + L"\"";
+        }
+
         wstring BuildExportText()
         {
             if (CurrentControls().empty())
                 return L"// No controls defined.\n";
 
             std::wstring result;
+            std::vector<wstring> hwndVars(CurrentControls().size());
+            std::vector<std::vector<wstring>> tabPageVars(CurrentControls().size());
+
+            for (size_t i = 0; i < CurrentControls().size(); ++i)
+            {
+                hwndVars[i] = std::format(L"hwnd_{}_{}",
+                    wui::ControlTypeLabel(CurrentControls()[i].type),
+                    (int)i);
+
+                if (CurrentControls()[i].type == wui::ControlType::Tab)
+                {
+                    const auto& pages = TabPagesFor(CurrentControls()[i]);
+                    tabPageVars[i].reserve(pages.size());
+                    for (size_t pi = 0; pi < pages.size(); ++pi)
+                        tabPageVars[i].push_back(std::format(L"{}_Page_{}", hwndVars[i], (int)pi));
+                }
+            }
 
             result += L"// Control ID definitions\n";
             std::unordered_set<int> seenIds;
@@ -2611,21 +2836,45 @@ namespace win32_ui_editor
                     ? c.styleExpr
                     : wui::default_style_expr(c.type);
 
-                const std::wstring className = wui::ExportClassName(c);
-                const std::wstring escapedClass = escape_wstring_literal(className);
-                const std::wstring escapedText = escape_wstring_literal(c.text);
+                wstring parentExpr = L"hwndParent";
+                int relX = x;
+                int relY = y;
+                if (c.parentIndex >= 0 && c.parentIndex < (int)CurrentControls().size())
+                {
+                    const auto& parent = CurrentControls()[c.parentIndex];
+                    if (parent.type == wui::ControlType::Tab)
+                    {
+                        const int page = NormalizedTabPage(c.parentIndex, c.tabPageId);
+                        if (page >= 0 &&
+                            c.parentIndex < (int)tabPageVars.size() &&
+                            page < (int)tabPageVars[(size_t)c.parentIndex].size())
+                        {
+                            parentExpr = tabPageVars[(size_t)c.parentIndex][(size_t)page];
 
-                wstring varName = std::format(L"hwnd_{}_{}",
-                    wui::ControlTypeLabel(c.type),
-                    (int)i);
+                            RECT pageRect = parent.rect;
+                            if (c.parentIndex < (int)g.hwndControls.size() && g.hwndControls[(size_t)c.parentIndex])
+                                pageRect = TabPageRectInDesignCoords(parent, g.hwndControls[(size_t)c.parentIndex]);
+                            relX = x - pageRect.left;
+                            relY = y - pageRect.top;
+                        }
+                    }
+                    else
+                    {
+                        parentExpr = hwndVars[(size_t)c.parentIndex];
+                        relX = x - parent.rect.left;
+                        relY = y - parent.rect.top;
+                    }
+                }
+
+                const wstring& varName = hwndVars[i];
 
                 result += L"HWND " + varName + L" = CreateWindowExW(\n";
                 result += L"    0,\n";
-                result += L"    L\"" + escapedClass + L"\",\n";
-                result += L"    L\"" + escapedText + L"\",\n";
+                result += L"    " + export_class_expr(c) + L",\n";
+                result += L"    " + export_text_expr(c) + L",\n";
                 result += L"    " + styleToken + L",\n";
-                result += std::format(L"    {}, {}, {}, {},\n", x, y, w, h);
-                result += L"    hwndParent,\n";
+                result += std::format(L"    {}, {}, {}, {},\n", relX, relY, w, h);
+                result += L"    " + parentExpr + L",\n";
                 result += L"    (HMENU)(INT_PTR)" + idToken + L",\n";
                 result += L"    hInst,\n";
                 result += L"    NULL);\n";
@@ -2644,6 +2893,18 @@ namespace win32_ui_editor
                         result += std::format(L"        TabCtrl_InsertItem({}, {}, &tci);\n", varName, (int)pi);
                     }
                     result += L"    }\n";
+
+                    result += std::format(L"RECT rcTabPage_{}{{0, 0, {}, {}}};\n", (int)i, w, h);
+                    result += std::format(L"TabCtrl_AdjustRect({}, FALSE, &rcTabPage_{});\n", varName, (int)i);
+                    for (size_t pi = 0; pi < pages.size(); ++pi)
+                    {
+                        result += std::format(
+                            L"HWND {} = CreateWindowExW(0, L\"STATIC\", NULL, WS_CHILD | {} | WS_CLIPCHILDREN | WS_CLIPSIBLINGS, rcTabPage_{}.left, rcTabPage_{}.top, rcTabPage_{}.right - rcTabPage_{}.left, rcTabPage_{}.bottom - rcTabPage_{}.top, {}, NULL, hInst, NULL);\n",
+                            tabPageVars[i][pi],
+                            pi == 0 ? L"WS_VISIBLE" : L"0",
+                            (int)i, (int)i, (int)i, (int)i, (int)i, (int)i,
+                            varName);
+                    }
 
                     result += std::format(L"// TAB_ITEMS id={}: ", c.id);
                     for (size_t pi = 0; pi < pages.size(); ++pi)
@@ -2807,6 +3068,7 @@ namespace win32_ui_editor
         {
             HMENU hMenuBar = CreateMenu();
             HMENU hFile = CreateMenu();
+            HMENU hEdit = CreateMenu();
             HMENU hInsert = CreateMenu();
             HMENU hArrange = CreateMenu();
             HMENU hView = CreateMenu();
@@ -2815,6 +3077,9 @@ namespace win32_ui_editor
             AppendMenuW(hFile, MF_STRING, IDM_EXPORT, L"E&xport to Clipboard");
             AppendMenuW(hFile, MF_STRING, IDM_EXPORT_FILE, L"Export to &File...");
             AppendMenuW(hFile, MF_STRING, IDM_IMPORT, L"&Import from C/C++...");
+
+            AppendMenuW(hEdit, MF_STRING, IDM_DUPLICATE, L"&Duplicate\tCtrl+D");
+            AppendMenuW(hEdit, MF_STRING, IDM_DELETE, L"&Delete\tDel");
 
             AppendMenuW(hInsert, MF_STRING | (g.drawToCreateMode ? MF_CHECKED : 0), IDM_TOGGLE_DRAW_MODE, L"Draw to Create");
             AppendMenuW(hInsert, MF_SEPARATOR, 0, nullptr);
@@ -2840,6 +3105,7 @@ namespace win32_ui_editor
             AppendMenuW(hView, MF_STRING, IDM_VIEW_ZOOM_RESET, L"Zoom &Reset	Ctrl+0");
 
             AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hFile, L"&File");
+            AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hEdit, L"&Edit");
             AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hInsert, L"&Insert");
             AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hArrange, L"&Arrange");
             AppendMenuW(hMenuBar, MF_POPUP, (UINT_PTR)hView, L"&View");
@@ -3270,6 +3536,10 @@ namespace win32_ui_editor
                 break;
             }
 
+            case WM_KEYDOWN:
+                if (HandleEditorKeyDown(wp))
+                    return 0;
+
             case WM_PAINT:
             {
                 PAINTSTRUCT ps{};
@@ -3413,6 +3683,9 @@ namespace win32_ui_editor
 
             case WM_KEYDOWN:
             {
+                if (HandleEditorKeyDown(wp))
+                    return 0;
+
                 if (GetKeyState(VK_CONTROL) & 0x8000)
                 {
                     if (wp == VK_OEM_PLUS || wp == VK_ADD) { ZoomIn(); return 0; }
@@ -3522,6 +3795,9 @@ namespace win32_ui_editor
                     RefreshPropertyPanel();
                     RedrawDesignOverlay();
                     return 0;
+
+                case IDM_DELETE:    DeleteSelection();    return 0;
+                case IDM_DUPLICATE: DuplicateSelection(); return 0;
 
                 case IDM_EXPORT:      ExportLayoutToClipboard(); return 0;
                 case IDM_EXPORT_FILE: ExportLayoutToFile();      return 0;

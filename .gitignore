@@ -31,6 +31,7 @@
 *.out
 *.app
 
+build/
 *.vs
 *x64
 WinClassicGuiEditor/layout_export.cpp

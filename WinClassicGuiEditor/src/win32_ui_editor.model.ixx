@@ -103,7 +103,7 @@ export namespace win32_ui_editor::model
         case ControlType::Slider:   return TRACKBAR_CLASSW;
         case ControlType::Tab:      return WC_TABCONTROLW;
         case ControlType::ListView: return WC_LISTVIEWW;
-        case ControlType::Tooltip:  return TOOLTIPS_CLASS;
+        case ControlType::Tooltip:  return TOOLTIPS_CLASSW;
         }
         return L"STATIC";
     }
